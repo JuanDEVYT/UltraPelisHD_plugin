@@ -1,0 +1,39 @@
+{
+  "id": "ultrapelishd",
+  "name": "UltraPelisHD",
+  "version": "1.0.0",
+  "apiVersion": 6,
+  "entry": "plugin.js",
+  "description": "Películas, series, anime y doramas de UltraPelisHD con sus copias por idioma (Latino, Castellano, Subtitulado, Inglés) y todos sus servidores.",
+  "author": "JuanDEVYT",
+  "homepage": "https://github.com/JuanDEVYT/UltraPelisHD_plugin",
+  "hosts": ["ultrapelishd.com", "api-encrypted.moviemaster.lat"],
+  "streamHosts": "any",
+  "capabilities": ["search", "home", "browse", "episodes", "resolve"],
+  "categories": ["movies", "series", "anime"],
+  "section": { "label": "UltraPelisHD" },
+  "theme": {
+    "accent": "#54B9C5",
+    "onAccent": "#06181A",
+    "background": "#141414",
+    "surface": "#1F1F1F",
+    "highlight": "#F5C518"
+  },
+  "color": "#E50914",
+  "icon": "icon.png",
+  "settings": [
+    {
+      "key": "lang",
+      "label": "Idioma preferido",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        { "value": "auto", "label": "Automático (el que mejor reproduzca)" },
+        { "value": "LAT", "label": "🇲🇽 Latino" },
+        { "value": "ESP", "label": "🇪🇸 Castellano" },
+        { "value": "SUB", "label": "🇬🇧 Subtitulado" },
+        { "value": "ENG", "label": "🇺🇸 Inglés" }
+      ]
+    }
+  ]
+}
