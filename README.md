@@ -17,6 +17,10 @@ JuanDEVYT/UltraPelisHD_plugin
 Kino muestra qué hosts usa y qué puede hacer; al aceptar, el plugin aparece en Inicio, en
 Buscar, en Categorías y con su propia sección **UltraPelisHD**.
 
+> Para que Kino lo muestre en "De la comunidad" el repositorio tiene que ser **público** y llevar el
+topic **`kino-plugin`** (GitHub ▸ About ▸ Topics). Sin ese topic la app solo lo instala escribiendo
+la dirección.
+
 ## Qué incluye
 
 | | |
