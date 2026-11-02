@@ -70,7 +70,8 @@ El plugin deja un rastro de todo lo que hace, pensado para saber qué pasó sin 
    y de Buscar (cuántas filas y títulos, cuántos resultados y en cuántos milisegundos), más el
    último error de red con su URL.
 2. **Ajustes ▸ UltraPelisHD ▸ Probar conexión**: pide Inicio y el buscador del sitio y responde en
-   cuántos milisegundos, guardando el resultado en la línea de estado.
+   cuántos milisegundos con **cuánto pesó la página y si traía catálogo o no**, guardando el
+   resultado en la línea de estado.
 3. **Modo debug** (viene encendido): en la pestaña del plugin aparece **Registro**, con una línea por
    cada petición (`GET /movies -> 200 55717B`), cada fila, cada búsqueda y cada fallo, y se puede
    copiar o compartir.
@@ -81,6 +82,14 @@ búsquedas que responden bien se guardan diez minutos.
 
 Si el Registro muestra `network` o un `HTTP 403`, el problema es de red o del propio sitio en ese
 aparato, no del catálogo: prueba con otra red o más tarde.
+
+**Verificación del sitio.** UltraPelisHD protege sus páginas contra clientes que no parecen un
+navegador. Si a un aparato le contesta una página de ~12 KB, en inglés, con `200` pero **sin
+catálogo** (el Registro lo anota con su `<title>` y con «sin catálogo»), el plugin ya hace todo
+esto por su cuenta: pide como un Chrome de Android real, reintenta una vez con otro perfil y, si
+las páginas siguen bloqueadas, arma el Inicio y la Sección con los catálogos y, en último caso,
+con el RSS del sitio (`/feed.xml`, 30 títulos con póster) mientras dura el bloqueo, sin gastar el
+presupuesto de peticiones de Kino en cada reintento.
 
 ## Notas
 

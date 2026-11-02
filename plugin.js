@@ -11,9 +11,27 @@
 const BASE = "https://ultrapelishd.com";
 const PAPI = "https://api-encrypted.moviemaster.lat";
 const HLS = "application/vnd.apple.mpegurl";
+// El sitio protege sus páginas contra clientes que no parecen un navegador: con el User-Agent de
+// Kino contestó una página de verificación en inglés, de 12 KB y sin catálogo. Por eso se pide como
+// un Chrome de Android de verdad, y si igual llega la verificación se reintenta con otro perfil.
 const UA_PAGE = {
-  Accept: "text/html,application/xhtml+xml",
+  "User-Agent":
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+  "Cache-Control": "no-cache",
+  Pragma: "no-cache",
+  "Upgrade-Insecure-Requests": "1",
+  Referer: "https://ultrapelishd.com/",
+};
+
+const UA_ALT = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+  "Cache-Control": "no-cache",
+  Referer: "https://ultrapelishd.com/",
 };
 const UA_API = {
   Accept: "application/json",
@@ -143,23 +161,55 @@ function countItems(rows) {
   return n;
 }
 
+function pageTitle(html) {
+  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(String(html || ""));
+  return m ? textOf(m[1]).slice(0, 70) : "";
+}
+
+// Una página del sitio con catálogo trae tarjetas, una ficha o el reproductor. La de verificación
+// no trae ninguna de esas marcas y pesa muy poco.
+function looksLikeCatalog(body) {
+  return /class="cd"|class="tp"|data-player|data-embed|data-pass|<section class="row"|class="ep"|class="gt"/.test(
+    String(body || ""),
+  );
+}
+
+function blockedNote(body) {
+  const title = pageTitle(body);
+  return (body.length + "B") + (title ? " «" + title + "»" : "") + (looksLikeCatalog(body) ? "" : " sin catálogo");
+}
+
+// Cuando el sitio contesta su verificación, las páginas HTML no van a servir durante un rato: se
+// anota para no gastar peticiones del presupuesto de Kino en cada reintento del Inicio.
+let blockedUntil = 0;
+
 async function get(url, timeoutMs) {
   const short = String(url).replace(BASE, "");
   const ms = Math.max(3000, Math.min(20000, Number(timeoutMs) || 12000));
-  const r = await kino.fetch(url, { headers: UA_PAGE, timeoutMs: ms });
-  const body = r.text();
-  log("GET", short, "->", r.status, body.length + "B");
+  let r = await kino.fetch(url, { headers: UA_PAGE, timeoutMs: ms });
+  let body = r.text();
+  const type = String((r.headers && r.headers["content-type"]) || "").split(";")[0];
+  log("GET", short, "->", r.status, body.length + "B", type);
+
+  if (r.ok && body.length < 30000 && !looksLikeCatalog(body)) {
+    log("sin catálogo en", short, "·", blockedNote(body));
+    remember("fetch", short + ": " + blockedNote(body));
+    try {
+      const again = await kino.fetch(url, { headers: UA_ALT, timeoutMs: ms });
+      const other = again.text();
+      log("GET (2º intento)", short, "->", again.status, other.length + "B", looksLikeCatalog(other) ? "con catálogo" : "sin catálogo");
+      if (again.ok && looksLikeCatalog(other)) {
+        r = again;
+        body = other;
+      }
+    } catch (e) {
+      log("2º intento falló:", (e && e.code) || "error");
+    }
+  }
+
   if (!r.ok) {
     remember("fetch", "HTTP " + r.status + " en " + short);
     throw kino.error(r.status === 404 ? "not_found" : "unavailable", "UltraPelisHD respondió " + r.status);
-  }
-  // Una página diminuta con estas palabras es una verificación del sitio, no el catálogo.
-  if (body.length < 20000 && /just a moment|cf-browser-verification|cf-chl|captcha|access denied|attention required/i.test(body)) {
-    log("verificación del sitio en", short, "·", body.length + "B");
-    remember("fetch", "el sitio pidió una verificación en " + short);
-    throw kino.error("unavailable", "el sitio pidió una verificación", {
-      userMessage: "UltraPelisHD pidió una verificación al aparato. Inténtalo más tarde o desde otra red.",
-    });
   }
   return body;
 }
@@ -532,26 +582,99 @@ async function resolveCopy(raw) {
 // ---------------------------------------------------------------- inicio, sección, categorías
 
 export async function home() {
-  const html = await get(BASE + "/", 12000);
-  const rows = rowsOf(html);
-  log("home:", rows.length, "filas,", countItems(rows), "títulos");
-  remember("home", rows.length + " filas · " + countItems(rows) + " títulos");
+  let html = "";
+  try {
+    html = await get(BASE + "/", 12000);
+  } catch (e) {
+    log("home: falló / ·", (e && e.code) || (e && e.message) || "error");
+  }
+
+  let rows = html ? rowsOf(html) : [];
   if (!rows.length) {
-    log("home sin filas · inicio de la página:", html.slice(0, 140).replace(/\s+/g, " "));
-    remember("home", "la página no trajo filas (" + html.length + "B)");
+    log("home sin filas ·", html ? blockedNote(html) : "sin respuesta");
+    blockedUntil = Date.now() + 60000;
+    // Respaldo: el Inicio se arma con los catálogos, que son páginas distintas del sitio.
+    const pares = [
+      ["movies", "Películas nuevas"],
+      ["movies?sort=trending", "Tendencia esta semana"],
+      ["series", "Series nuevas"],
+      ["animes", "Anime"],
+    ];
+    const listas = await Promise.all(pares.map((p) => listRow(p[0], p[1])));
+    rows = [];
+    for (let i = 0; i < listas.length; i++) if (listas[i]) rows.push(listas[i]);
+    if (rows.length) {
+      log("home: armado con los catálogos ·", rows.length, "filas,", countItems(rows), "títulos");
+      remember("home", "catálogos: " + rows.length + " filas · " + countItems(rows) + " títulos");
+      return rows;
+    }
+    const feed = await feedItems();
+    if (feed.length) {
+      log("home: armado con el RSS ·", feed.length, "títulos");
+      remember("home", "RSS: 1 fila · " + feed.length + " títulos");
+      return [{ id: "row-recien-anadido", title: "Recién añadido", items: feed.slice(0, 30) }];
+    }
+    remember("home", "sin filas · " + (html ? blockedNote(html) : "sin respuesta"));
     throw kino.error("unavailable", "el inicio llegó sin filas", {
-      userMessage: "UltraPelisHD devolvió el Inicio sin filas. Mira Ajustes ▸ UltraPelisHD ▸ Últimas lecturas y el Registro.",
+      userMessage: "UltraPelisHD devolvió una página sin catálogo (puede ser una verificación del sitio). Mira Ajustes ▸ UltraPelisHD ▸ Últimas lecturas y el Registro.",
     });
   }
+
+  log("home:", rows.length, "filas,", countItems(rows), "títulos");
+  remember("home", rows.length + " filas · " + countItems(rows) + " títulos");
   return rows;
 }
 
+// /feed.xml es el mismo catálogo en RSS: 30 títulos con su póster, su año y su ruta, sin pasar por
+// la protección que el sitio pone a las páginas HTML. Es el último respaldo del Inicio y la Sección.
+async function feedItems() {
+  let xml = "";
+  try {
+    const r = await kino.fetch(BASE + "/feed.xml", { headers: UA_PAGE, timeoutMs: 12000 });
+    xml = r.ok ? r.text() : "";
+    log("GET /feed.xml ->", r.status, xml.length + "B");
+  } catch (e) {
+    log("feed.xml falló:", (e && e.code) || (e && e.message) || "error");
+    return [];
+  }
+
+  const out = [];
+  const seen = {};
+  const blocks = String(xml).split(/<item>/i).slice(1);
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    const link = textOf((/<link>([\s\S]*?)<\/link>/i.exec(b) || [])[1]);
+    const path = relative(link.replace(/^https?:\/\/[^/]+/i, ""));
+    const kind = kindOf(path);
+    if (!kind || seen[path]) continue;
+    seen[path] = true;
+    const raw = textOf((/<title>([\s\S]*?)<\/title>/i.exec(b) || [])[1]);
+    if (!raw) continue;
+    const year = /\((\d{4})\)\s*$/.exec(raw);
+    const item = { id: kinoId(path), ref: path, title: raw.replace(/\s*\(\d{4}\)\s*$/, ""), kind: kind };
+    if (!item.title) continue;
+    const poster = (/<media:thumbnail[^>]*url="([^"]+)"/i.exec(b) || [])[1];
+    if (poster) item.poster = decode(poster);
+    if (year) item.year = year[1];
+    out.push(item);
+  }
+  log("feed:", out.length, "títulos");
+  return out;
+}
+
 async function listRow(path, title, ref) {
+  if (Date.now() < blockedUntil) {
+    log("fila", path, "omitida: el sitio está contestando su verificación");
+    return null;
+  }
   try {
     const html = await get(BASE + "/" + path);
     const items = cards(html);
     log("fila", path, "->", items.length, "títulos");
-    if (!items.length) return null;
+    if (!items.length) {
+      log("fila", path, "sin tarjetas ·", blockedNote(html));
+      return null;
+    }
     return { id: "row-" + rowSlug(title), title: title, ref: ref || path, items: items.slice(0, 30) };
   } catch (e) {
     log("fila", path, "falló:", (e && e.code) || (e && e.message) || "error");
@@ -595,6 +718,18 @@ export async function section(args) {
   }
   const listas = await Promise.all(pares.map((p) => listRow(p[0], p[1])));
   for (let i = 0; i < listas.length; i++) add(listas[i]);
+
+  // Respaldo: si las páginas del catálogo llegaron vacías, el RSS deja al menos una fila con lo último.
+  if (!rows.length) {
+    const feed = await feedItems();
+    const kind = chosen === "peliculas" ? "movie" : "series";
+    const items = [];
+    for (let i = 0; i < feed.length; i++) if (feed[i].kind === kind) items.push(feed[i]);
+    if (items.length) {
+      log("section", chosen, ": armada con el RSS ·", items.length, "títulos");
+      add({ id: "row-recien-anadido", title: "Recién añadido", items: items.slice(0, 30) });
+    }
+  }
 
   log("section", chosen, "->", rows.length, "filas,", countItems(rows), "títulos");
   remember("section", chosen + ": " + rows.length + " filas · " + countItems(rows) + " títulos");
@@ -965,24 +1100,36 @@ export async function settingsStatus() {
 export async function action(key) {
   if (key !== "probar") return null;
   const started = Date.now();
-  let ok = false;
-  let detail = "";
+  let status = 0;
+  let page = "";
+  let note = "";
+  let apiOk = false;
+
   try {
-    const page = await kino.fetch(BASE + "/", { headers: UA_PAGE, timeoutMs: 12000 });
-    const quick = await kino.fetch(BASE + "/api/suggest?q=dune", {
+    const r = await kino.fetch(BASE + "/", { headers: UA_PAGE, timeoutMs: 12000 });
+    status = r.status;
+    page = r.text();
+    note = looksLikeCatalog(page) ? "con catálogo" : "SIN catálogo " + blockedNote(page);
+  } catch (e) {
+    note = "error " + String((e && e.code) || "de red");
+  }
+
+  try {
+    const q = await kino.fetch(BASE + "/api/suggest?q=dune", {
       headers: { Accept: "application/json" },
       timeoutMs: 12000,
     });
-    ok = page.ok && quick.ok;
-    if (!page.ok) detail = " (HTTP " + page.status + ")";
+    apiOk = q.ok;
   } catch (e) {
-    detail = " (" + String((e && e.code) || "sin conexión") + ")";
+    apiOk = false;
   }
+
+  const ok = status === 200 && looksLikeCatalog(page) && apiOk;
   kino.storage.set("check", { at: Date.now(), ok: ok });
-  const ms = Date.now() - started;
+  remember("fetch", ok ? "conexión correcta" : "inicio " + (status ? "HTTP " + status + ", " : "") + note);
+
+  const head = status ? "Inicio: HTTP " + status + ", " + page.length + "B, " + note : note;
   return {
-    message: ok
-      ? "UltraPelisHD responde bien (" + ms + " ms)."
-      : "No se pudo conectar con UltraPelisHD" + detail + ".",
+    message: (head + " · Buscador: " + (apiOk ? "bien" : "mal") + " · " + (Date.now() - started) + " ms").slice(0, 300),
   };
 }
