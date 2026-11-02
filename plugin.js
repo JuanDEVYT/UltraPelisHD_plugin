@@ -183,9 +183,46 @@ function blockedNote(body) {
 // anota para no gastar peticiones del presupuesto de Kino en cada reintento del Inicio.
 let blockedUntil = 0;
 
+// UltraPelisHD está detrás de Cloudflare y a algunas redes les contesta «Un momento…». El navegador
+// oculto de Kino (kino.browser.page) es un WebView de verdad: pasa ese chequeo solo y devuelve el
+// HTML ya renderizado, que es justo lo que este plugin lee.
+let browserModeUntil = 0;
+let pageQueue = Promise.resolve();
+
+function canUseHiddenBrowser() {
+  return !!(kino.browser && typeof kino.browser.page === "function");
+}
+
+// Una página a la vez: Kino abre una sola ventana oculta y a la segunda le responde «busy».
+function readHiddenPage(url, ms) {
+  const run = pageQueue.then(() => kino.browser.page(url, { timeoutMs: Math.max(5000, Math.min(20000, ms)) }));
+  pageQueue = run.then(
+    () => null,
+    () => null,
+  );
+  return run.then((r) => (r && r.html ? String(r.html) : ""));
+}
+
 async function get(url, timeoutMs) {
   const short = String(url).replace(BASE, "");
   const ms = Math.max(3000, Math.min(20000, Number(timeoutMs) || 12000));
+
+  // Si esta red ya necesitó la ventana oculta, se va directo a ella: ahorra el viaje que siempre
+  // vuelve con la página de verificación.
+  if (Date.now() < browserModeUntil && canUseHiddenBrowser()) {
+    try {
+      const html = await readHiddenPage(url, ms);
+      if (looksLikeCatalog(html)) {
+        log("página oculta", short, "->", html.length + "B", "con catálogo");
+        return html;
+      }
+      log("página oculta", short, "sin catálogo ·", html.length + "B");
+    } catch (e) {
+      log("página oculta falló:", (e && e.code) || (e && e.message) || "error");
+      browserModeUntil = 0;
+    }
+  }
+
   let r = await kino.fetch(url, { headers: UA_PAGE, timeoutMs: ms });
   let body = r.text();
   const type = String((r.headers && r.headers["content-type"]) || "").split(";")[0];
@@ -194,17 +231,42 @@ async function get(url, timeoutMs) {
   if (r.ok && body.length < 30000 && !looksLikeCatalog(body)) {
     log("sin catálogo en", short, "·", blockedNote(body));
     remember("fetch", short + ": " + blockedNote(body));
+
+    // 1º: otro perfil de navegador.
     try {
       const again = await kino.fetch(url, { headers: UA_ALT, timeoutMs: ms });
       const other = again.text();
       log("GET (2º intento)", short, "->", again.status, other.length + "B", looksLikeCatalog(other) ? "con catálogo" : "sin catálogo");
-      if (again.ok && looksLikeCatalog(other)) {
+      if (again.ok) {
         r = again;
         body = other;
       }
     } catch (e) {
       log("2º intento falló:", (e && e.code) || "error");
     }
+
+    // 2º: el navegador oculto, que sí resuelve la verificación del sitio.
+    if (!looksLikeCatalog(body) && canUseHiddenBrowser()) {
+      try {
+        const html = await readHiddenPage(url, ms);
+        log(
+          "navegador oculto",
+          short,
+          "->",
+          html.length + "B",
+          looksLikeCatalog(html) ? "con catálogo" : "sin catálogo",
+        );
+        if (looksLikeCatalog(html)) {
+          browserModeUntil = Date.now() + 5 * 60000;
+          remember("fetch", "verificación pasada con el navegador oculto en " + short);
+          return html;
+        }
+      } catch (e) {
+        log("navegador oculto:", (e && e.code) || (e && e.message) || "error");
+      }
+    }
+
+    if (!looksLikeCatalog(body)) blockedUntil = Date.now() + 60000;
   }
 
   if (!r.ok) {
@@ -593,6 +655,7 @@ export async function home() {
   if (!rows.length) {
     log("home sin filas ·", html ? blockedNote(html) : "sin respuesta");
     blockedUntil = Date.now() + 60000;
+    if (!canUseHiddenBrowser()) log("esta versión de Kino no trae navegador oculto: no se puede pasar la verificación");
     // Respaldo: el Inicio se arma con los catálogos, que son páginas distintas del sitio.
     const pares = [
       ["movies", "Películas nuevas"],
@@ -716,7 +779,10 @@ export async function section(args) {
       ["doramas?sort=rating", "Doramas mejor valorados"],
     ];
   }
-  const listas = await Promise.all(pares.map((p) => listRow(p[0], p[1])));
+  // Con la ventana oculta de por medio cada fila es una carga de WebView y van de una en una: se
+  // piden las dos primeras para no pasarse del plazo de Kino.
+  const pedidas = Date.now() < browserModeUntil ? pares.slice(0, 2) : pares;
+  const listas = await Promise.all(pedidas.map((p) => listRow(p[0], p[1])));
   for (let i = 0; i < listas.length; i++) add(listas[i]);
 
   // Respaldo: si las páginas del catálogo llegaron vacías, el RSS deja al menos una fila con lo último.
@@ -1129,7 +1195,11 @@ export async function action(key) {
   remember("fetch", ok ? "conexión correcta" : "inicio " + (status ? "HTTP " + status + ", " : "") + note);
 
   const head = status ? "Inicio: HTTP " + status + ", " + page.length + "B, " + note : note;
+  const extra = looksLikeCatalog(page) ? "" : " · se pasa sola al abrir Inicio";
   return {
-    message: (head + " · Buscador: " + (apiOk ? "bien" : "mal") + " · " + (Date.now() - started) + " ms").slice(0, 300),
+    message: (head + " · Buscador: " + (apiOk ? "bien" : "mal") + extra + " · " + (Date.now() - started) + " ms").slice(
+      0,
+      300,
+    ),
   };
 }

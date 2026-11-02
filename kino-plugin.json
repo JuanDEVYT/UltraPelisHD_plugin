@@ -1,7 +1,7 @@
 {
   "id": "ultrapelishd",
   "name": "UltraPelisHD",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "apiVersion": 9,
   "debug": true,
   "entry": "plugin.js",
@@ -10,6 +10,7 @@
   "homepage": "https://github.com/JuanDEVYT/UltraPelisHD_plugin",
   "hosts": ["ultrapelishd.com", "api-encrypted.moviemaster.lat"],
   "streamHosts": "any",
+  "browser": "pages",
   "capabilities": ["search", "home", "browse", "episodes", "resolve", "download"],
   "categories": ["movies", "series", "anime"],
   "section": { "label": "UltraPelisHD" },

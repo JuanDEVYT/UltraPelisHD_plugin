@@ -83,13 +83,14 @@ búsquedas que responden bien se guardan diez minutos.
 Si el Registro muestra `network` o un `HTTP 403`, el problema es de red o del propio sitio en ese
 aparato, no del catálogo: prueba con otra red o más tarde.
 
-**Verificación del sitio.** UltraPelisHD protege sus páginas contra clientes que no parecen un
-navegador. Si a un aparato le contesta una página de ~12 KB, en inglés, con `200` pero **sin
-catálogo** (el Registro lo anota con su `<title>` y con «sin catálogo»), el plugin ya hace todo
-esto por su cuenta: pide como un Chrome de Android real, reintenta una vez con otro perfil y, si
-las páginas siguen bloqueadas, arma el Inicio y la Sección con los catálogos y, en último caso,
-con el RSS del sitio (`/feed.xml`, 30 títulos con póster) mientras dura el bloqueo, sin gastar el
-presupuesto de peticiones de Kino en cada reintento.
+**Verificación del sitio.** UltraPelisHD está detrás de Cloudflare: a algunas redes el sitio les
+contesta **«Un momento…»** (~12 KB, en inglés, con `200` pero sin catálogo) en vez del Inicio. El
+plugin lo detecta y usa el **navegador oculto de Kino** (`kino.browser.page`), que es un WebView de
+verdad: pasa ese chequeo solo y devuelve la página ya renderizada. Desde ahí todo sigue igual: las
+peticiones de esa sesión van por la ventana oculta (una a la vez, como permite Kino) y a los cinco
+minutos vuelve a probar la vía normal. Por eso el plugin pide, en la hoja de consentimiento, abrir
+páginas web ocultas. Si tu Kino es anterior a ese soporte, el Registro lo dice y solo queda el
+respaldo de los catálogos y del RSS.
 
 ## Notas
 
