@@ -1,15 +1,16 @@
 {
   "id": "ultrapelishd",
   "name": "UltraPelisHD",
-  "version": "1.0.0",
-  "apiVersion": 6,
+  "version": "1.2.0",
+  "apiVersion": 9,
+  "debug": true,
   "entry": "plugin.js",
-  "description": "Películas, series, anime y doramas de UltraPelisHD con sus copias por idioma (Latino, Castellano, Subtitulado, Inglés) y todos sus servidores.",
+  "description": "Películas, series, anime y doramas de UltraPelisHD con sus copias por idioma (Latino, Castellano, Subtitulado, Inglés), todos sus servidores, fichas completas y panel en el reproductor.",
   "author": "JuanDEVYT",
   "homepage": "https://github.com/JuanDEVYT/UltraPelisHD_plugin",
   "hosts": ["ultrapelishd.com", "api-encrypted.moviemaster.lat"],
   "streamHosts": "any",
-  "capabilities": ["search", "home", "browse", "episodes", "resolve"],
+  "capabilities": ["search", "home", "browse", "episodes", "resolve", "download"],
   "categories": ["movies", "series", "anime"],
   "section": { "label": "UltraPelisHD" },
   "theme": {
@@ -21,19 +22,75 @@
   },
   "color": "#E50914",
   "icon": "icon.png",
+  "panel": { "label": "UltraPelisHD", "labelEn": "UltraPelisHD", "icon": "movie" },
   "settings": [
+    {
+      "key": "datos",
+      "label": "Preferencias",
+      "labelEn": "Preferences",
+      "type": "section",
+      "hint": "Elige con qué copia abre Kino cada título. Todas las copias quedan siempre en el menú Servidor del reproductor.",
+      "hintEn": "Choose which copy Kino starts with. Every copy always stays in the player's Server menu."
+    },
     {
       "key": "lang",
       "label": "Idioma preferido",
+      "labelEn": "Preferred language",
       "type": "select",
       "default": "auto",
+      "hint": "Solo cambia cuál va primero",
+      "hintEn": "Only changes which one comes first",
       "options": [
-        { "value": "auto", "label": "Automático (el que mejor reproduzca)" },
-        { "value": "LAT", "label": "🇲🇽 Latino" },
-        { "value": "ESP", "label": "🇪🇸 Castellano" },
-        { "value": "SUB", "label": "🇬🇧 Subtitulado" },
-        { "value": "ENG", "label": "🇺🇸 Inglés" }
+        { "value": "auto", "label": "Automático (el que mejor reproduzca)", "labelEn": "Automatic (best playing)" },
+        { "value": "LAT", "label": "🇲🇽 Latino", "labelEn": "🇲🇽 Latin Spanish" },
+        { "value": "ESP", "label": "🇪🇸 Castellano", "labelEn": "🇪🇸 Castilian Spanish" },
+        { "value": "SUB", "label": "🇬🇧 Subtitulado", "labelEn": "🇬🇧 Subtitled" },
+        { "value": "ENG", "label": "🇺🇸 Inglés", "labelEn": "🇺🇸 English" }
       ]
+    },
+    {
+      "key": "estado",
+      "label": "Conexión con UltraPelisHD",
+      "labelEn": "Connection to UltraPelisHD",
+      "type": "status"
+    },
+    {
+      "key": "probar",
+      "label": "Probar conexión",
+      "labelEn": "Test connection",
+      "type": "action"
+    },
+    {
+      "key": "ultimo",
+      "label": "Últimas lecturas",
+      "labelEn": "Last reads",
+      "type": "status"
+    },
+    {
+      "key": "servidores",
+      "label": "Servidores y copias",
+      "labelEn": "Servers and copies",
+      "type": "section",
+      "hint": "El plugin usa los servidores de UltraPelisHD y los entrega como copias del menú Servidor, cada una con la bandera de su idioma. Las versiones Subtitulado son las que traen los subtítulos quemados del sitio.",
+      "hintEn": "The plugin uses UltraPelisHD's servers and hands them to Kino as copies in the Server menu, each with its language flag. The Subtitled ones carry the site's burned-in subtitles."
     }
+  ],
+  "settingsLayout": [
+    {
+      "type": "card",
+      "title": "Idioma",
+      "titleEn": "Language",
+      "children": [{ "setting": "datos" }, { "setting": "lang" }]
+    },
+    {
+      "type": "card",
+      "title": "Conexión",
+      "titleEn": "Connection",
+      "children": [
+        { "type": "row", "children": [{ "setting": "estado" }, { "setting": "probar" }] },
+        { "setting": "ultimo" }
+      ]
+    },
+    { "setting": "servidores" }
   ]
 }

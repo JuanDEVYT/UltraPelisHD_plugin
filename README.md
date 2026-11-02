@@ -36,6 +36,11 @@ la dirección.
 | **Subtítulos** | Las versiones **Subtitulado** vienen como copia propia, y el reproductor de Kino muestra las pistas de subtítulos que traiga el manifiesto HLS. |
 | **Preferencia de idioma** | Ajuste **Idioma preferido** para que la copia de ese idioma sea la primera (o Automático). |
 | **Apariencia** | El icono, el rojo del sitio (#E50914) y su paleta (fondo #141414, superficies #1F1F1F, acento #54B9C5, destacado #F5C518) aplicados a la sección, la pestaña de Ajustes y el reproductor. |
+| **Ficha completa** (`details`) | Sinopsis, géneros, año, nota, duración e **ids de TMDB/IMDb**, para que Kino complete la página del título con TMDB. |
+| **Descargas** | Las copias se pueden guardar sin conexión (Kino lo ofrece en el título). |
+| **Panel en el reproductor** | Botón propio junto a "Audio y subtítulos": copia que suena, idiomas y servidores disponibles, ±10 s, velocidad 1,25x, lista de episodios y "Actualizar enlaces" si el pass caducó. |
+| **Siguiente episodio** | Cuenta regresiva de 8 s al terminar un capítulo, en vez de saltar de golpe. |
+| **Ajustes con estado** | Botón **Probar conexión** y una línea de estado con la última comprobación. |
 
 ## Cómo funciona
 
@@ -56,6 +61,26 @@ Los segmentos del video se sirven desde CDNs externos, por eso el manifiesto dec
 
 - **Idioma preferido**: Automático (el que mejor reproduzca, como el sitio), Latino, Castellano,
   Subtitulado o Inglés. Pone primero la copia de ese idioma; el resto queda a un toque.
+
+## Si algo no carga (registro y depuración)
+
+El plugin deja un rastro de todo lo que hace, pensado para saber qué pasó sin adivinar:
+
+1. **Ajustes ▸ UltraPelisHD ▸ Últimas lecturas**: resume la última lectura de Inicio, de la sección
+   y de Buscar (cuántas filas y títulos, cuántos resultados y en cuántos milisegundos), más el
+   último error de red con su URL.
+2. **Ajustes ▸ UltraPelisHD ▸ Probar conexión**: pide Inicio y el buscador del sitio y responde en
+   cuántos milisegundos, guardando el resultado en la línea de estado.
+3. **Modo debug** (viene encendido): en la pestaña del plugin aparece **Registro**, con una línea por
+   cada petición (`GET /movies -> 200 55717B`), cada fila, cada búsqueda y cada fallo, y se puede
+   copiar o compartir.
+
+Presupuestos de tiempo, para no pasarse del plazo de Kino: Inicio 12 s, cada página de sección 12 s
+(en paralelo, no en serie), buscador y página de resultados 8 s cada uno (también en paralelo). Las
+búsquedas que responden bien se guardan diez minutos.
+
+Si el Registro muestra `network` o un `HTTP 403`, el problema es de red o del propio sitio en ese
+aparato, no del catálogo: prueba con otra red o más tarde.
 
 ## Notas
 
