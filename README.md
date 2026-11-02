@@ -92,6 +92,12 @@ minutos vuelve a probar la vía normal. Por eso el plugin pide, en la hoja de co
 páginas web ocultas. Si tu Kino es anterior a ese soporte, el Registro lo dice y solo queda el
 respaldo de los catálogos y del RSS.
 
+Kino solo deja abrir esa ventana **mientras la persona usa la app** (su Inicio, su búsqueda, su
+lista, un título o el play): la llamada de fondo con la que Kino precalienta el Inicio al arrancar
+contesta `not_allowed`. El plugin lo registra tal cual, reintenta un par de veces durante unos
+segundos y guarda el último Inicio bueno, así que la siguiente apertura no sale en blanco. Si el
+Registro dice `navegador oculto … not_allowed`, abre Inicio otra vez con la app delante.
+
 ## Notas
 
 - El buscador del sitio tarda 15-25 s con consultas populares y Kino corta a los 15 s, así que el
