@@ -1,7 +1,7 @@
 {
   "id": "ultrapelishd",
   "name": "UltraPelisHD",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "apiVersion": 9,
   "debug": true,
   "entry": "plugin.js",

@@ -105,6 +105,12 @@ catálogo, que es lo que se veía en el Registro como `navegador oculto /movies 
 En resumen, si tu red recibe la verificación: Inicio la pasa con la ventana oculta cuando la abres tú,
 y a partir de ahí el catálogo guardado mantiene Inicio y Sección con contenido.
 
+Al reproducir, algunas redes reciben `403` en `/api/player-pass` y en la lista de servidores aunque la
+página se haya leído bien: Cloudflare solo atiende esas rutas a la ventana que ya pasó su
+verificación. El plugin lo intenta primero por la vía normal y, si le contestan `403`, pide esas dos
+respuestas JSON por la ventana oculta, que sí lleva la cookie. En el Registro se ve como
+`player-pass respondió 403 · se pide por la ventana oculta` y después `ok`.
+
 ## Notas
 
 - El buscador del sitio tarda 15-25 s con consultas populares y Kino corta a los 15 s, así que el

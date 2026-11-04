@@ -204,9 +204,14 @@ function canUseHiddenBrowser() {
 const WAIT_FOR_CATALOG = '(?:href="/movie/|href="/serie|data-embed=|data-pass=)';
 
 // Una página a la vez: Kino abre una sola ventana oculta y a la segunda le responde «busy».
-function readHiddenPage(url, ms) {
+function readHiddenPage(url, ms, waitFor) {
   const run = pageQueue.then(() =>
-    kino.browser.page(url, { timeoutMs: Math.max(8000, Math.min(20000, ms)), waitFor: WAIT_FOR_CATALOG }),
+    kino.browser.page(url, {
+      // Kino recorta al tiempo que le queda a la llamada, así que se pide de más: el desafío del sitio
+      // tarda hasta 9-10 s en pasar y con 8 s se quedaba a medias en el buscador.
+      timeoutMs: Math.max(12000, Math.min(20000, ms)),
+      waitFor: waitFor || WAIT_FOR_CATALOG,
+    }),
   );
   pageQueue = run.then(
     () => null,
@@ -247,6 +252,44 @@ async function hiddenPage(url, short, ms) {
   }
   log("navegador oculto", short, "sigue sin dejarse abrir; se probará al abrir Inicio");
   return "";
+}
+
+// Una respuesta JSON abierta en el WebView queda dentro de un <pre>; se saca de ahí y se parsea. Sirve
+// para las rutas que el sitio solo entrega a la ventana que ya pasó su verificación (el pass del
+// reproductor y la lista de servidores responden 403 a un fetch aparte en algunas redes).
+function jsonFromPage(html) {
+  const s = String(html || "");
+  const pre = /<pre[^>]*>([\s\S]*?)<\/pre>/i.exec(s);
+  const text = (pre ? pre[1] : s)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+  try {
+    return JSON.parse(text.trim());
+  } catch (e) {}
+  const inner = /\{[\s\S]*\}/.exec(text);
+  if (inner) {
+    try {
+      return JSON.parse(inner[0]);
+    } catch (e) {}
+  }
+  return null;
+}
+
+async function browserJson(url, waitFor, ms) {
+  if (!canUseHiddenBrowser()) return null;
+  try {
+    const html = await readHiddenPage(url, ms, waitFor);
+    const j = jsonFromPage(html);
+    if (j) return j;
+    log("navegador oculto (json)", "sin respuesta legible ·", String(html || "").length + "B");
+  } catch (e) {
+    log("navegador oculto (json):", (e && e.code) || (e && e.message) || "error");
+  }
+  return null;
 }
 
 // El último resultado bueno de una página del catálogo, para no quedarse en blanco mientras el sitio
@@ -546,14 +589,30 @@ function playInfo(html) {
 }
 
 async function getPass(play, pageUrl) {
-  const r = await kino.fetch(BASE + play.passPath, {
-    headers: { Accept: "application/json", Referer: pageUrl },
-    timeoutMs: 15000,
+  const url = BASE + play.passPath;
+  let status = 0;
+  try {
+    const r = await kino.fetch(url, { headers: { Accept: "application/json", Referer: pageUrl }, timeoutMs: 15000 });
+    if (r.ok) {
+      const j = r.json();
+      if (j && j.pass) return String(j.pass);
+      log("player-pass: la respuesta no trae pass");
+    } else {
+      status = r.status;
+      log("player-pass respondió", r.status, "· se pide por la ventana oculta");
+    }
+  } catch (e) {
+    log("player-pass falló:", (e && e.code) || (e && e.message) || "error");
+  }
+  const j = await browserJson(url, '"pass"', 12000);
+  if (j && j.pass) {
+    log("player-pass por la ventana oculta · ok");
+    return String(j.pass);
+  }
+  throw kino.error("unavailable", "el pass respondió " + (status || "error"), {
+    userMessage:
+      "UltraPelisHD no entregó la clave del reproductor para este título. Vuelve a intentarlo en un momento; si sigue igual, prueba con otro título.",
   });
-  if (!r.ok) throw kino.error("unavailable", "el pass respondió " + r.status);
-  const j = r.json();
-  if (!j || !j.pass) throw kino.error("unavailable", "sin pass del reproductor");
-  return String(j.pass);
 }
 
 function queryOf(play) {
@@ -564,9 +623,21 @@ function queryOf(play) {
 
 async function listServers(play, pass, pageUrl) {
   const url = PAPI + "/servers?" + queryOf(play) + "&pass=" + encodeURIComponent(pass);
-  const r = await kino.fetch(url, { headers: UA_API, timeoutMs: 15000 });
-  if (!r.ok) throw kino.error("unavailable", "la lista de servidores respondió " + r.status);
-  const j = r.json();
+  let j = null;
+  try {
+    const r = await kino.fetch(url, { headers: UA_API, timeoutMs: 15000 });
+    if (r.ok) j = r.json();
+    else log("servidores respondió", r.status, "· se piden por la ventana oculta");
+  } catch (e) {
+    log("servidores falló:", (e && e.code) || (e && e.message) || "error");
+  }
+  if (!j || !j.servers) {
+    const alto = await browserJson(url, '"servers"', 12000);
+    if (alto && alto.servers) {
+      log("servidores por la ventana oculta ·", alto.servers.length);
+      j = alto;
+    }
+  }
   const list = (j && j.servers) || [];
   const out = [];
   const seen = {};
