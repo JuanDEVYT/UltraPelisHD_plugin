@@ -94,9 +94,16 @@ respaldo de los catálogos y del RSS.
 
 Kino solo deja abrir esa ventana **mientras la persona usa la app** (su Inicio, su búsqueda, su
 lista, un título o el play): la llamada de fondo con la que Kino precalienta el Inicio al arrancar
-contesta `not_allowed`. El plugin lo registra tal cual, reintenta un par de veces durante unos
-segundos y guarda el último Inicio bueno, así que la siguiente apertura no sale en blanco. Si el
-Registro dice `navegador oculto … not_allowed`, abre Inicio otra vez con la app delante.
+contesta `not_allowed`. El plugin lo registra tal cual, reintenta una vez y guarda el último Inicio
+bueno, así que la siguiente apertura no sale en blanco. Si el Registro dice `navegador oculto …
+not_allowed`, abre Inicio otra vez con la app delante.
+
+La ventana se abre además con `waitFor`, la condición que espera Kino antes de entregar el HTML: sin
+esa espera el WebView devuelve el desafío tal como está (unos 11 KB de «Un momento…») en vez del
+catálogo, que es lo que se veía en el Registro como `navegador oculto /movies sin catálogo`.
+
+En resumen, si tu red recibe la verificación: Inicio la pasa con la ventana oculta cuando la abres tú,
+y a partir de ahí el catálogo guardado mantiene Inicio y Sección con contenido.
 
 ## Notas
 

@@ -198,9 +198,16 @@ function canUseHiddenBrowser() {
   return !!(kino.browser && typeof kino.browser.page === "function");
 }
 
+// Con waitFor, Kino devuelve el HTML solo cuando la página ya pasó el chequeo automático del sitio y
+// su DOM coincide: es la diferencia entre recibir el «Un momento…» a medio resolver (~11 KB, el
+// WebView tarda 1-3 s y lo entrega tal cual) y el catálogo de verdad.
+const WAIT_FOR_CATALOG = '(?:href="/movie/|href="/serie|data-embed=|data-pass=)';
+
 // Una página a la vez: Kino abre una sola ventana oculta y a la segunda le responde «busy».
 function readHiddenPage(url, ms) {
-  const run = pageQueue.then(() => kino.browser.page(url, { timeoutMs: Math.max(5000, Math.min(20000, ms)) }));
+  const run = pageQueue.then(() =>
+    kino.browser.page(url, { timeoutMs: Math.max(8000, Math.min(20000, ms)), waitFor: WAIT_FOR_CATALOG }),
+  );
   pageQueue = run.then(
     () => null,
     () => null,
@@ -209,8 +216,9 @@ function readHiddenPage(url, ms) {
 }
 
 // Kino contesta «not_allowed» en la llamada de fondo que hace al arrancar y vuelve a dejar abrir la
-// ventana en cuanto la persona toca. Se reintenta un par de veces dentro del plazo de la llamada.
-const HIDDEN_WAITS = [0, 600, 1400];
+// ventana en cuanto la persona toca. Se reintenta una sola vez (Kino permite 20 páginas por minuto y
+// cada fila de la sección gasta una), sin insistir cuando el fallo es de verdad: timeout o blocked.
+const HIDDEN_WAITS = [0, 900];
 
 async function hiddenPage(url, short, ms) {
   if (!canUseHiddenBrowser()) return "";
@@ -232,6 +240,7 @@ async function hiddenPage(url, short, ms) {
     } catch (e) {
       const code = (e && e.code) || (e && e.message) || "error";
       log("navegador oculto", short, i + 1 + "/" + HIDDEN_WAITS.length + ":", code);
+      if (code === "timeout") log("navegador oculto", short, "no pasó el chequeo del sitio a tiempo");
       // Solo se insiste cuando es cuestión de momento: la app en segundo plano, o la ventana ocupada.
       if (code !== "not_allowed" && code !== "busy") return "";
     }
