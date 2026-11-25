@@ -324,7 +324,8 @@ async function crawl({ only, limit, concurrency, delay }) {
 
 const pad2 = (n) => String(n).padStart(2, "0");
 function versionOf(d = new Date()) {
-  return d.getUTCFullYear() + "." + pad2(d.getUTCMonth() + 1) + "." + pad2(d.getUTCDate()) + "-" + pad2(d.getUTCHours()) + pad2(d.getUTCMinutes());
+  // Con segundos: dos builds seguidos tienen que dar versiones distintas (si no, el delta no se escribe).
+  return d.getUTCFullYear() + "." + pad2(d.getUTCMonth() + 1) + "." + pad2(d.getUTCDate()) + "-" + pad2(d.getUTCHours()) + pad2(d.getUTCMinutes()) + pad2(d.getUTCSeconds());
 }
 
 async function build() {
