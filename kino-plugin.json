@@ -1,19 +1,37 @@
 {
   "id": "ultrapelishd",
   "name": "UltraPelisHD",
-  "version": "1.4.3",
-  "apiVersion": 9,
+  "version": "1.5.0",
+  "apiVersion": 20,
   "debug": true,
   "entry": "plugin.js",
-  "description": "Películas, series, anime y doramas de UltraPelisHD con sus copias por idioma (Latino, Castellano, Subtitulado, Inglés), todos sus servidores, fichas completas y panel en el reproductor.",
+  "description": "Películas, series, anime y doramas de UltraPelisHD con sus copias por idioma (Latino, Castellano, Subtitulado, Inglés), sus servidores, fichas completas, panel en el reproductor y pantalla propia.",
   "author": "JuanDEVYT",
   "homepage": "https://github.com/JuanDEVYT/UltraPelisHD_plugin",
-  "hosts": ["ultrapelishd.com", "api-encrypted.moviemaster.lat"],
+  "hosts": [
+    "ultrapelishd.com",
+    "api-encrypted.moviemaster.lat"
+  ],
   "streamHosts": "any",
   "browser": "pages",
-  "capabilities": ["search", "home", "browse", "episodes", "resolve", "download"],
-  "categories": ["movies", "series", "anime"],
-  "section": { "label": "UltraPelisHD" },
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "episodes",
+    "resolve",
+    "download",
+    "screen"
+  ],
+  "categories": [
+    "movies",
+    "series",
+    "anime"
+  ],
+  "section": {
+    "label": "UltraPelisHD",
+    "labelEn": "UltraPelisHD"
+  },
   "theme": {
     "accent": "#54B9C5",
     "onAccent": "#06181A",
@@ -23,7 +41,11 @@
   },
   "color": "#E50914",
   "icon": "icon.png",
-  "panel": { "label": "UltraPelisHD", "labelEn": "UltraPelisHD", "icon": "movie" },
+  "panel": {
+    "label": "UltraPelisHD",
+    "labelEn": "UltraPelisHD",
+    "icon": "movie"
+  },
   "settings": [
     {
       "key": "datos",
@@ -42,11 +64,31 @@
       "hint": "Solo cambia cuál va primero",
       "hintEn": "Only changes which one comes first",
       "options": [
-        { "value": "auto", "label": "Automático (el que mejor reproduzca)", "labelEn": "Automatic (best playing)" },
-        { "value": "LAT", "label": "🇲🇽 Latino", "labelEn": "🇲🇽 Latin Spanish" },
-        { "value": "ESP", "label": "🇪🇸 Castellano", "labelEn": "🇪🇸 Castilian Spanish" },
-        { "value": "SUB", "label": "🇬🇧 Subtitulado", "labelEn": "🇬🇧 Subtitled" },
-        { "value": "ENG", "label": "🇺🇸 Inglés", "labelEn": "🇺🇸 English" }
+        {
+          "value": "auto",
+          "label": "Automático (el que mejor reproduzca)",
+          "labelEn": "Automatic (best playing)"
+        },
+        {
+          "value": "LAT",
+          "label": "🇲🇽 Latino",
+          "labelEn": "🇲🇽 Latin Spanish"
+        },
+        {
+          "value": "ESP",
+          "label": "🇪🇸 Castellano",
+          "labelEn": "🇪🇸 Castilian Spanish"
+        },
+        {
+          "value": "SUB",
+          "label": "🇬🇧 Subtitulado",
+          "labelEn": "🇬🇧 Subtitled"
+        },
+        {
+          "value": "ENG",
+          "label": "🇺🇸 Inglés",
+          "labelEn": "🇺🇸 English"
+        }
       ]
     },
     {
@@ -81,17 +123,56 @@
       "type": "card",
       "title": "Idioma",
       "titleEn": "Language",
-      "children": [{ "setting": "datos" }, { "setting": "lang" }]
+      "children": [
+        {
+          "setting": "datos"
+        },
+        {
+          "setting": "lang"
+        }
+      ]
     },
     {
       "type": "card",
       "title": "Conexión",
       "titleEn": "Connection",
       "children": [
-        { "type": "row", "children": [{ "setting": "estado" }, { "setting": "probar" }] },
-        { "setting": "ultimo" }
+        {
+          "type": "row",
+          "children": [
+            {
+              "setting": "estado"
+            },
+            {
+              "setting": "probar"
+            }
+          ]
+        },
+        {
+          "setting": "ultimo"
+        }
       ]
     },
-    { "setting": "servidores" }
-  ]
+    {
+      "setting": "servidores"
+    }
+  ],
+  "screen": {
+    "label": "UltraPelisHD",
+    "labelEn": "UltraPelisHD",
+    "icon": "movie",
+    "menuOpens": "screen",
+    "opensFrom": [
+      "menu",
+      "settings"
+    ],
+    "settingsButton": {
+      "label": "Abrir UltraPelisHD",
+      "labelEn": "Open UltraPelisHD"
+    }
+  },
+  "signature": {
+    "authorKey": "0036d8031405ef39f52a4c120617f46a8db166fa23867367f7ae68360f7e31cd",
+    "value": "ff5cf12492a7d64f359ee9de4b3d2184bb1e99ad40e577c8a133dfeb710d09b647188f51593a3148eb3dc82bb6c2b1c20a1b6b64d94d9cdcefc0ddbba8331209"
+  }
 }

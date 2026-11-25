@@ -643,7 +643,7 @@ async function listServers(play, pass, pageUrl) {
   const seen = {};
   for (let i = 0; i < list.length; i++) {
     const s = list[i];
-    if (!s || !s.id || !s.k || !s.video) continue;
+    if (!s || !s.id || !s.k) continue;   // el video ya no viene aquí: se pide a /video por su id
     if (s.type && s.type !== "hls" && s.type !== "mp4") continue;
     if (seen[s.k]) continue;
     seen[s.k] = true;
@@ -653,7 +653,9 @@ async function listServers(play, pass, pageUrl) {
       name: String(s.name || "Servidor"),
       lang: String(s.lang || "").toUpperCase(),
       type: s.type || "hls",
-      video: String(s.video),
+      site: String(s.site || ""),
+      mode: String(s.mode || ""),
+      detras: !!s.detras,
     });
   }
   return out;
@@ -684,63 +686,207 @@ function ordered(servers) {
   return first.concat(rest);
 }
 
-// Una copia lista para Kino: la dirección del manifiesto de ese servidor con el pass del título.
-// El pass dura diez minutos, así que si la reproducción falla después Kino vuelve a resolver.
-function streamFor(server, pass) {
+// ── presupuesto, caché y manifiestos ─────────────────────────────────────────
+
+const RESOLVE_MS = 18000;          // el contrato corta `resolve` a los 20 s: se deja margen
+const CACHE_OK = 30 * 60000;       // media hora, revalidando antes de servir
+const MAX_ALTERNATIVAS = 8;
+const restante = (hasta) => Math.max(0, hasta - Date.now());
+
+const esManifiesto = (url) => /\.(m3u8|mpd)(\?|$)/i.test(String(url || ""));
+
+// Un enlace que contesta 4xx está muerto (estas URLs van firmadas y caducan en minutos): no se le
+// entrega a Kino. Un 5xx o un fallo de red se perdonan, que el CDN puede estar teniendo un mal rato.
+async function vivo(url, headers, hasta) {
+  if (!url) return true;
+  const ms = Math.max(1500, Math.min(5000, restante(hasta) - 1500));
+  if (ms < 1500) return true;
+  try {
+    const r = await kino.fetch(url, { headers: headers || {}, timeoutMs: ms });
+    return r.ok || Number(r.status) >= 500;
+  } catch (e) {
+    return true;
+  }
+}
+
+function claveOk(path) {
+  return "ok:" + path;
+}
+
+function leerOk(path) {
+  try {
+    const h = kino.storage.get(claveOk(path));
+    if (h && h.url && h.at && Date.now() - h.at < CACHE_OK) return h;
+  } catch (e) {}
+  return null;
+}
+
+function guardarOk(path, valor) {
+  try {
+    kino.storage.set(claveOk(path), Object.assign({ at: Date.now() }, valor));
+  } catch (e) {}
+}
+
+function borrarOk(path) {
+  try {
+    kino.storage.remove(claveOk(path));
+  } catch (e) {}
+}
+
+function sinSesion() {
+  return kino.error("unavailable", "el sitio pide cuenta", {
+    userMessage:
+      "UltraPelisHD ahora pide una cuenta gratis para reproducir. En Ajustes ▸ UltraPelisHD pulsa \u00abIniciar sesi\u00f3n\u00bb, crea la cuenta en la ventana que se abre y vuelve a intentarlo.",
+  });
+}
+
+// ── la puerta de fuentes del reproductor ─────────────────────────────────────
+
+// La ficha ya no lleva el iframe: lleva una puerta (`data-uph-watch`) que, si hay sesi\u00f3n, entrega las
+// fuentes. Cada fuente es el HTML de un iframe con su `src` y su `data-pass`.
+function puertaDe(html) {
+  const m = /data-uph-watch="([^"]+)"/.exec(String(html || ""));
+  return m ? decode(m[1]) : "";
+}
+
+function fuenteDe(html) {
+  const plano = decode(String(html || ""));
+  const tag = (/<iframe[^>]*>/i.exec(plano) || [plano])[0];
+  const src = /src=["']([^"']+)/i.exec(tag);
+  if (!src) return null;
+  let parts;
+  let url;
+  try {
+    url = new URL(decode(src[1]));
+    parts = url.pathname.split("/").filter(Boolean);
+  } catch (e) {
+    return null;
+  }
+  if (parts[0] !== "embed" || !parts[2]) return null;
+  const pass = /data-pass=["']([^"']+)/i.exec(tag);
   return {
-    url: server.video + "&pass=" + encodeURIComponent(pass),
+    type: parts[1] === "tv" ? "tv" : "movie",
+    tmdb: parts[2],
+    season: Number(parts[3]) || 1,
+    episode: Number(parts[4]) || 1,
+    lang: String(url.searchParams.get("lang") || "").toUpperCase(),
+    passPath: pass ? decode(pass[1]) : "",
+  };
+}
+
+// Devuelve la lista de fuentes del título. Sin sesi\u00f3n el sitio contesta 401 y no hay nada que hacer:
+// se avisa con el mensaje de la cuenta en vez de seguir pidiendo pases que van a fallar.
+async function fuentesDe(pageUrl, hasta) {
+  const html = await get(pageUrl);
+  const puerta = puertaDe(html);
+  if (!puerta) {
+    const viejo = fuenteDe(html);              // por si el sitio vuelve al iframe de antes
+    if (viejo) return [viejo];
+    throw kino.error("not_found", "sin reproductor en " + pageUrl, {
+      userMessage: "UltraPelisHD todavía no tiene este título disponible para ver.",
+    });
+  }
+
+  const url = /^https?:\/\//.test(puerta) ? puerta : BASE + puerta;
+  let r;
+  try {
+    r = await kino.fetch(url, {
+      headers: Object.assign({}, UA_API, { Referer: pageUrl }),
+      timeoutMs: Math.max(4000, Math.min(12000, restante(hasta))),
+    });
+  } catch (e) {
+    throw kino.error("unavailable", "la puerta no contestó", {
+      userMessage: "No se pudo comprobar tu sesión en UltraPelisHD. Revisa la conexión y vuelve a intentarlo.",
+    });
+  }
+  if (r.status === 401 || r.status === 403) throw sinSesion();
+  if (r.status === 404) {
+    throw kino.error("not_found", "la puerta no conoce el título", {
+      userMessage: "UltraPelisHD cambió las fuentes de este título. Vuelve a entrar en su ficha.",
+    });
+  }
+  if (!r.ok) throw kino.error("unavailable", "la puerta respondió " + r.status);
+
+  let j = null;
+  try {
+    j = r.json();
+  } catch (e) {
+    j = null;
+  }
+  const out = [];
+  const fuentes = (j && j.sources) || {};
+  const claves = Object.keys(fuentes);
+  for (let i = 0; i < claves.length; i++) {
+    const bruto = fuentes[claves[i]];
+    const f = fuenteDe(bruto && (bruto.html || bruto.src) ? bruto.html || bruto.src : bruto);
+    if (f) {
+      f.clave = claves[i];
+      out.push(f);
+    }
+  }
+  if (!out.length) {
+    log("la puerta no trajo fuentes legibles ·", claves.length, "claves");
+    throw kino.error("not_found", "la puerta no trajo fuentes", {
+      userMessage: "UltraPelisHD no tiene ninguna copia de este título ahora mismo.",
+    });
+  }
+  // El idioma del ajuste primero: la fuente ya viene con su `?lang=`.
+  const pref = String(kino.config.get("lang") || "").toUpperCase();
+  if (pref && pref !== "AUTO") out.sort((a, b) => (b.lang === pref) - (a.lang === pref));
+  log("puerta:", out.length, "fuentes", out.map((f) => f.lang || "?").join("/"));
+  return out;
+}
+
+// Una copia lista para Kino: el endpoint /video del reproductor con la copia elegida. Dura lo que la
+// sesión del sitio; si falla después, Kino vuelve a resolver.
+function streamFor(play, server) {
+  return {
+    url: PAPI + "/video?" + queryOf(play) + "&noiframe=1&embed=" + encodeURIComponent(server.id),
     mime: HLS,
     expiresInSeconds: 540,
   };
 }
 
-export async function resolve(ref) {
-  const raw = String(ref == null ? "" : ref);
-  if (raw.indexOf("|") >= 0) return resolveCopy(raw);
+// El orden que ya trae la API es el de "lo que mejor reproduce". Se adelantan las copias directas: las
+// de `mode: proxy` y las que van por detrás de otro reproductor tardan más y fallan más.
+function porCalidad(servers) {
+  const peso = (s) => (s.mode === "proxy" ? 2 : 0) + (s.detras ? 1 : 0);
+  return servers
+    .map((s, i) => ({ s: s, i: i }))
+    .sort((a, b) => peso(a.s) - peso(b.s) || a.i - b.i)
+    .map((x) => x.s);
+}
 
-  const path = raw.replace(/^\/+/, "");
-  if (!path) throw kino.error("not_found");
-  const pageUrl = BASE + "/" + path;
-  const html = await get(pageUrl);
-  const play = playInfo(html);
-  if (!play) {
-    throw kino.error("not_found", "sin reproductor en " + path, {
-      userMessage: "UltraPelisHD todavía no tiene este título disponible para ver.",
-    });
-  }
-  const pass = await getPass(play, pageUrl);
-  const servers = ordered(await listServers(play, pass, pageUrl));
-  if (!servers.length) {
-    throw kino.error("not_found", "sin servidores en " + path, {
-      userMessage: "UltraPelisHD no tiene ningún servidor disponible para este título ahora mismo.",
-    });
-  }
-
-  // La primera copia se entrega ya; las demás son copias perezosas: Kino solo las resuelve si la
-  // persona cambia de servidor o si la que suena falla.
-  const stream = streamFor(servers[0], pass);
-  stream.label = copyLabel(servers[0]);
-  const rest = servers.slice(1);
-  if (rest.length) {
-    stream.alternatives = rest.slice(0, 8).map((s) => ({
-      label: copyLabel(s),
-      ref: path + "|" + s.k,
-    }));
+// Una copia ya armada: la forma que Kino lee, con la etiqueta de su idioma.
+function copiaDe(path, play, server, servers) {
+  const stream = streamFor(play, server);
+  stream.label = copyLabel(server);
+  const otras = servers.filter((s) => s.k !== server.k).slice(0, MAX_ALTERNATIVAS);
+  if (otras.length) {
+    stream.alternatives = otras.map((s) => ({ label: copyLabel(s), ref: path + "|" + s.k }));
   }
   return stream;
 }
 
-async function resolveCopy(raw) {
+// Copia diferida (la que llega desde el menú Servidor): se resuelve con la sesión del momento, así que
+// nunca lleva un pass caducado. El manifiesto se comprueba antes de entregarlo.
+async function abrirCopia(raw) {
   const cut = raw.lastIndexOf("|");
   const path = raw.slice(0, cut).replace(/^\/+/, "");
   const key = raw.slice(cut + 1);
   if (!path || !key) throw kino.error("not_found");
+  const hasta = Date.now() + RESOLVE_MS;
   const pageUrl = BASE + "/" + path;
-  const html = await get(pageUrl);
-  const play = playInfo(html);
-  if (!play) throw kino.error("not_found", "sin reproductor en " + path);
-  const pass = await getPass(play, pageUrl);
-  const servers = await listServers(play, pass, pageUrl);
+  const fuentes = await fuentesDe(pageUrl, hasta);
+  let play = null;
+  let servers = [];
+  for (let i = 0; i < fuentes.length && !servers.length; i++) {
+    const f = fuentes[i];
+    if (!f.passPath) continue;
+    const pass = await getPass(f, pageUrl);
+    servers = porCalidad(await listServers(f, pass, pageUrl));
+    play = f;
+  }
   let server = null;
   for (let i = 0; i < servers.length; i++) if (servers[i].k === key) server = servers[i];
   if (!server) {
@@ -748,9 +894,98 @@ async function resolveCopy(raw) {
       userMessage: "Ese servidor ya no está en UltraPelisHD; elige otra copia en el menú Servidor.",
     });
   }
-  const stream = streamFor(server, pass);
+  const stream = streamFor(play, server);
+  if (!(await vivo(stream.url, {}, hasta))) {
+    throw kino.error("not_found", "la copia no da manifiesto", {
+      userMessage: "Esa copia no está disponible ahora. Prueba con otra.",
+    });
+  }
   stream.label = copyLabel(server);
   return stream;
+}
+
+export async function resolve(ref) {
+  const raw = String(ref == null ? "" : ref);
+  if (raw.indexOf("|") >= 0) return abrirCopia(raw);
+
+  const path = raw.replace(/^\/+/, "");
+  if (!path) throw kino.error("not_found");
+  const hasta = Date.now() + RESOLVE_MS;
+
+  // 1) Enlace guardado: se sirve solo si su manifiesto sigue vivo; si no, se borra y se resuelve de nuevo.
+  const guardado = leerOk(path);
+  if (guardado) {
+    if (await vivo(guardado.url, guardado.headers, hasta)) {
+      log("resolve: enlace guardado de", path);
+      return {
+        url: guardado.url,
+        mime: guardado.mime || HLS,
+        ...(guardado.label ? { label: guardado.label } : {}),
+        ...(Array.isArray(guardado.alternatives) && guardado.alternatives.length
+          ? { alternatives: guardado.alternatives.filter((a) => a && typeof a.ref === "string").slice(0, MAX_ALTERNATIVAS) }
+          : {}),
+      };
+    }
+    borrarOk(path);
+  }
+
+  // 2) La ficha, la puerta y sus fuentes.
+  const pageUrl = BASE + "/" + path;
+  const fuentes = await fuentesDe(pageUrl, hasta);
+
+  // 3) Pass y servidores con la primera fuente que responda.
+  let play = null;
+  let servers = [];
+  for (let i = 0; i < fuentes.length; i++) {
+    const f = fuentes[i];
+    if (!f.passPath) continue;
+    try {
+      const pass = await getPass(f, pageUrl);
+      const lista = porCalidad(await listServers(f, pass, pageUrl));
+      if (lista.length) {
+        play = f;
+        servers = lista;
+        break;
+      }
+    } catch (e) {
+      log("fuente", f.lang || i + 1, "sin servidores:", (e && e.code) || (e && e.message) || "error");
+      if (e && e.code === "unavailable" && /cuenta/.test(String(e.message || ""))) throw e;
+    }
+  }
+  if (!servers.length) {
+    throw kino.error("not_found", "sin servidores en " + path, {
+      userMessage: "UltraPelisHD no tiene ningún servidor que reproduzca este título ahora mismo.",
+    });
+  }
+
+  // 4) Se entrega la primera copia cuyo manifiesto esté vivo; si ninguna lo está, se avisa claro.
+  for (let i = 0; i < servers.length; i++) {
+    const stream = streamFor(play, servers[i]);
+    if (!(await vivo(stream.url, {}, hasta))) {
+      log("copia muerta:", servers[i].k);
+      continue;
+    }
+    const salida = copiaDe(path, play, servers[i], servers);
+    guardarOk(path, salida);
+    log("resolve:", path, "->", salida.label, "en", RESOLVE_MS - restante(hasta), "ms");
+    return salida;
+  }
+  throw kino.error("unavailable", "ninguna copia da manifiesto", {
+    userMessage: "Ninguna copia de este título se puede reproducir ahora. Inténtalo más tarde.",
+  });
+}
+
+// `prepare` deja el enlace listo antes de que Kino lo pida (al abrir la ficha), sin bloquear nada.
+export async function prepare(ref) {
+  const raw = String(ref == null ? "" : ref);
+  if (!raw || raw.indexOf("|") >= 0) return;
+  const path = raw.replace(/^\/+/, "");
+  if (!path || leerOk(path)) return;
+  try {
+    await resolve(path);
+  } catch (e) {
+    log("prepare:", (e && e.code) || (e && e.message) || "error");
+  }
 }
 
 // ---------------------------------------------------------------- inicio, sección, categorías
@@ -1169,11 +1404,16 @@ async function copiesFor(ref, fresh) {
   const path = String(ref || "").replace(/^\/+/, "");
   if (!path) return "";
   const pageUrl = BASE + "/" + path;
-  const html = await get(pageUrl);
-  const play = playInfo(html);
+  const fuentes = await fuentesDe(pageUrl, Date.now() + 8000);
+  let play = null;
+  let servers = [];
+  for (let i = 0; i < fuentes.length && !servers.length; i++) {
+    if (!fuentes[i].passPath) continue;
+    const pass = await getPass(fuentes[i], pageUrl);
+    servers = ordered(await listServers(fuentes[i], pass, pageUrl));
+    play = fuentes[i];
+  }
   if (!play) return "";
-  const pass = await getPass(play, pageUrl);
-  const servers = ordered(await listServers(play, pass, pageUrl));
   const counts = { by: {}, order: [] };
   for (let i = 0; i < servers.length; i++) {
     const code = servers[i].lang || "";
@@ -1253,6 +1493,359 @@ export async function playerEvent(event, context) {
   if (!event || event.type !== "ended") return null;
   if (!seriesRefOf(context && context.ref)) return null;
   return { player: { autoNext: { enabled: true, countdownS: 8 } } };
+}
+
+// ---------------------------------------------------------------- pantalla (apiVersion 20, como Xuper)
+//
+// El cascar\u00f3n es el de Xuper: un Scaffold con una barra que se funde con la de Kino (`mergeWithKinoBar`),
+// cinco destinos abajo en el tel\u00e9fono y el mismo cat\u00e1logo dentro. En el televisor no hay barra inferior:
+// los destinos van como TabBar en la cabecera.
+
+const NAV = [
+  { key: "inicio", icon: "home", es: "Inicio", en: "Home" },
+  { key: "peliculas", icon: "movie", es: "Pel\xEDculas", en: "Movies" },
+  { key: "series", icon: "tv", es: "Series", en: "Series" },
+  { key: "anime", icon: "star", es: "Anime", en: "Anime" },
+  { key: "ajustes", icon: "settings", es: "Ajustes", en: "Settings" },
+];
+
+const navKey = (v) => {
+  const k = String(v == null ? "" : v);
+  for (let i = 0; i < NAV.length; i++) if (NAV[i].key === k) return k;
+  return "inicio";
+};
+
+const twin = (es, en) => ({ text: es, textEn: en });
+const busyBar = () => ({ type: "LinearProgressIndicator", key: "busy", hidden: true });
+const busyEvent = (event, arg) => ({ ui: [{ show: "busy" }], event: event, ...(arg !== undefined ? { arg: arg } : {}) });
+const borde = { left: 12, right: 12 };
+
+const navBar = (active) => ({
+  type: "NavigationBar",
+  value: active,
+  onChanged: busyEvent("nav"),
+  items: NAV.map((n) => ({ key: n.key, icon: n.icon, label: n.es, labelEn: n.en })),
+});
+
+const navTabs = (active) => ({
+  type: "TabBar",
+  key: "navTabs",
+  divider: false,
+  value: active,
+  onChanged: busyEvent("nav"),
+  tabs: NAV.map((n) => ({ value: n.key, label: n.es, labelEn: n.en })),
+});
+
+const marca = { type: "Text", key: "marca", text: "UltraPelisHD", textEn: "UltraPelisHD", style: "h4" };
+
+const cerrarLeading = () => ({
+  type: "IconButton",
+  key: "cerrar",
+  icon: "close",
+  labelText: "Cerrar",
+  labelTextEn: "Close",
+  onPressed: { go: { close: true } },
+});
+
+function appBar(nav, device, actions) {
+  if (device === "tv") {
+    return {
+      type: "AppBar",
+      mergeWithKinoBar: true,
+      dense: true,
+      divider: false,
+      leading: cerrarLeading(),
+      title: { type: "Row", key: "tvTitle", gap: 16, crossAxisAlignment: "center", children: [marca, navTabs(nav)] },
+      ...(actions.length ? { actions: actions } : {}),
+    };
+  }
+  const titulo = nav === "inicio" ? marca : { type: "Text", key: "secTitle", text: NAV.find((n) => n.key === nav).es, textEn: NAV.find((n) => n.key === nav).en, style: "h4" };
+  return {
+    type: "AppBar",
+    mergeWithKinoBar: true,
+    dense: true,
+    divider: false,
+    leading: cerrarLeading(),
+    title: titulo,
+    ...(actions.length ? { actions: actions } : {}),
+  };
+}
+
+const railNode = (row, i, device) => ({
+  type: "titleRail",
+  key: "rail-" + i,
+  title: String(row.title || "").slice(0, 80),
+  items: (Array.isArray(row.items) ? row.items : []).slice(0, 24),
+  ...(row.ref ? { ref: row.ref } : {}),
+  size: device === "tv" ? "small" : "medium",
+  margin: borde,
+});
+
+const bannerError = (es, en) => ({
+  type: "MaterialBanner",
+  key: "error",
+  role: "error",
+  margin: borde,
+  text: es,
+  textEn: en,
+  action: { label: "Reintentar", labelEn: "Retry", onTap: busyEvent("reload") },
+});
+
+// El h\u00e9roe de Xuper: un PageView con las portadas de la primera fila, con sus dos botones.
+function heroNode(items) {
+  const slides = items.slice(0, 5).filter((x) => x && x.title);
+  if (!slides.length) return null;
+  const uno = (x, i) => ({
+    type: "heroCard",
+    key: "hero-" + i,
+    h: { compact: 200, expanded: 240 },
+    title: x.title,
+    ...(x.poster || x.backdrop ? { image: x.backdrop || x.poster } : {}),
+    buttons: [
+      { type: "ElevatedButton", key: "play-" + i, labelText: "Ver", labelTextEn: "Play", icon: "play", onPressed: { go: { play: { ref: x.ref, kind: x.kind || "movie", id: x.id, title: x.title } } } },
+      { type: "TextButton", key: "info-" + i, labelText: "Ficha", labelTextEn: "Details", onPressed: { go: { title: { ref: x.ref, kind: x.kind || "movie", id: x.id, title: x.title } } } },
+    ],
+  });
+  if (slides.length === 1) return uno(slides[0], 0);
+  return { type: "PageView", key: "hero", autoPlayMs: 6000, children: slides.map(uno) };
+}
+
+async function inicioNodes(device) {
+  let rows = [];
+  try {
+    rows = (await home()) || [];
+  } catch (e) {
+    return [bannerError("No se pudo cargar el catálogo. Revisa la conexión.", "Could not load. Check your connection.")];
+  }
+  const conItems = rows.filter((r) => r && Array.isArray(r.items) && r.items.length);
+  if (!conItems.length) return [bannerError("El catálogo llegó vacío.", "The catalog came back empty.")];
+  const hero = heroNode(conItems[0].items);
+  const rails = conItems.slice(0, 10).map((r, i) => railNode(r, i, device));
+  return [...(hero ? [hero] : []), ...rails];
+}
+
+async function listaNodes(nav, device) {
+  const tabs = { peliculas: "peliculas", series: "series", anime: "anime" };
+  let rows = [];
+  try {
+    const r = await section({ tab: tabs[nav] });
+    rows = (r && r.rows) || [];
+  } catch (e) {
+    return [bannerError("No se pudo cargar esta sección.", "This section could not be loaded.")];
+  }
+  const conItems = rows.filter((r) => r && Array.isArray(r.items) && r.items.length);
+  if (!conItems.length) {
+    return [{ type: "EmptyState", key: "vacio", icon: "movie", title: "Sin t\xEDtulos", titleEn: "No titles", text: "No hay t\xEDtulos disponibles ahora.", textEn: "No titles right now." }];
+  }
+  return conItems.map((r, i) => railNode(r, i, device));
+}
+
+async function busquedaNodes(query) {
+  let items = [];
+  try {
+    items = (await search({ q: query })) || [];
+  } catch (e) {
+    return [bannerError("No se pudo buscar. Revisa la conexión.", "The search failed. Check your connection.")];
+  }
+  const head = {
+    type: "Row",
+    key: "q-head",
+    gap: 12,
+    crossAxisAlignment: "center",
+    margin: borde,
+    children: [
+      { type: "Text", key: "q-t", text: `Resultados para \u201c${query}\u201d`, textEn: `Results for \u201c${query}\u201d`, style: "h4", flex: 1, maxLines: 2 },
+      { type: "TextButton", key: "q-clear", labelText: "Quitar", labelTextEn: "Clear", onPressed: busyEvent("clearSearch") },
+    ],
+  };
+  if (!items.length) {
+    return [head, { type: "EmptyState", key: "q-vacio", icon: "search", title: "Sin resultados", titleEn: "No results", text: `No hay t\xEDtulos para \u201c${query}\u201d.`, textEn: `Nothing for \u201c${query}\u201d.` }];
+  }
+  return [head, { type: "titleGrid", key: "q-grid", columns: { compact: 3, expanded: 5 }, items: items.slice(0, 60) }];
+}
+
+async function ajustesNodes(state) {
+  const out = [];
+  if (state && state.aviso) out.push({ type: "MaterialBanner", key: "aviso", role: "info", margin: borde, text: String(state.aviso), textEn: String(state.aviso) });
+  let estado = "Sin comprobaci\u00f3n todav\xEDa";
+  try {
+    const st = await settingsStatus();
+    estado = String((st && st.estado) || estado);
+  } catch (e) {}
+  const idioma = String(kino.config.get("lang") || "auto");
+  const nombres = { auto: "Autom\xE1tico", LAT: "Latino", ESP: "Castellano", SUB: "Subtitulado", ENG: "Ingl\xE9s" };
+  out.push({
+    type: "Card",
+    key: "aj-card",
+    margin: borde,
+    padding: 16,
+    gap: 12,
+    children: [
+      { type: "Text", key: "aj-t", text: "UltraPelisHD", style: "h4" },
+      { type: "Text", key: "aj-estado", text: estado, textEn: estado, color: "muted" },
+      {
+        type: "Row",
+        key: "aj-row-idioma",
+        gap: 8,
+        crossAxisAlignment: "center",
+        children: [
+          { type: "Icon", key: "aj-i-idioma", name: "language", size: 20, color: "primary" },
+          { type: "Text", key: "aj-idioma", text: `Idioma preferido: ${nombres[idioma] || idioma}`, textEn: `Preferred language: ${nombres[idioma] || idioma}`, flex: 1 },
+        ],
+      },
+      {
+        type: "Text",
+        key: "aj-cuenta",
+        color: "muted",
+        text: "El sitio ahora pide una cuenta gratis para reproducir. Inicia sesi\u00f3n una vez y el plugin usar\u00e1 tu sesi\u00f3n.",
+        textEn: "The site now needs a free account to play. Sign in once and the plugin will use your session.",
+      },
+    ],
+  });
+  out.push({
+    type: "Row",
+    key: "aj-acciones",
+    gap: 12,
+    wrap: true,
+    margin: borde,
+    children: [
+      { type: "TextButton", key: "aj-sesion", icon: "login", labelText: "Iniciar sesi\u00f3n", labelTextEn: "Sign in", onPressed: busyEvent("sesion") },
+      { type: "TextButton", key: "aj-comprobar", icon: "refresh", labelText: "Comprobar el sitio", labelTextEn: "Check the site", onPressed: busyEvent("comprobar") },
+      { type: "TextButton", key: "aj-limpiar", icon: "delete", labelText: "Borrar la cach\xE9", labelTextEn: "Clear cache", onPressed: busyEvent("limpiar") },
+    ],
+  });
+  out.push({
+    type: "Text",
+    key: "aj-nota",
+    color: "muted",
+    style: "caption",
+    margin: borde,
+    text: "Los dem\xE1s ajustes est\xE1n en Ajustes \u25b8 Plugins \u25b8 UltraPelisHD.",
+    textEn: "The other settings are in Settings \u25b8 Plugins \u25b8 UltraPelisHD.",
+  });
+  return out;
+}
+
+const searchSheet = (query) => ({
+  type: "BottomSheet",
+  key: "buscar",
+  title: "Buscar",
+  titleEn: "Search",
+  children: [
+    {
+      type: "TextField",
+      key: "sq",
+      kind: "search",
+      maxLength: 120,
+      labelText: "Pel\xEDculas y series",
+      labelTextEn: "Movies and series",
+      trailingIcon: "search",
+      trailingLabel: "Buscar",
+      trailingLabelEn: "Search",
+      onSubmitted: { event: "search" },
+      onTrailingTap: { event: "search" },
+    },
+    ...(query ? [{ type: "TextButton", key: "sq-clear", labelText: "Quitar la b\xFAsqueda", labelTextEn: "Clear search", onPressed: busyEvent("clearSearch") }] : []),
+  ],
+});
+
+// La ventana del sitio: la persona crea su cuenta o entra, y el plugin usa esa sesi\u00f3n después.
+async function iniciarSesion() {
+  if (!canUseHiddenBrowser()) {
+    return { message: "Esta versi\u00f3n de Kino no deja abrir la ventana del sitio. Entra en ultrapelishd.com desde el navegador, crea tu cuenta y vuelve." };
+  }
+  try {
+    await kino.browser.page(BASE + "/account/login", { timeoutMs: 180000, waitFor: "form" });
+    remember("sesion", "ventana de acceso abierta");
+    return { message: "Si ya iniciaste sesi\u00f3n, vuelve a intentar la reproducci\u00f3n." };
+  } catch (e) {
+    const code = (e && e.code) || (e && e.message) || "error";
+    log("iniciar sesi\u00f3n:", code);
+    return { message: "No se pudo abrir la ventana del sitio (" + code + "). Int\xE9ntalo desde Ajustes con la app abierta." };
+  }
+}
+
+export async function screen(arg) {
+  const state = (arg && arg.state) || {};
+  const device = (arg && arg.device) || "phone";
+  const nav = navKey(state.nav);
+  const query = typeof state.query === "string" ? state.query.trim().slice(0, 120) : "";
+
+  let nodes;
+  if (query) nodes = await busquedaNodes(query);
+  else if (nav === "ajustes") nodes = await ajustesNodes(state);
+  else if (nav === "inicio") nodes = await inicioNodes(device);
+  else nodes = await listaNodes(nav, device);
+  if (!Array.isArray(nodes) || !nodes.length) nodes = [bannerError("No se pudo cargar el cat\u00e1logo.", "Could not load the catalog.")];
+
+  const actions = [
+    { type: "IconButton", key: "abrir-buscar", icon: "search", labelText: "Buscar", labelTextEn: "Search", onPressed: { ui: [{ open: "buscar" }] } },
+  ];
+
+  const out = {
+    type: "Scaffold",
+    key: "ultrapelis-screen",
+    appBar: appBar(nav, device, actions),
+    body: {
+      type: "Column",
+      key: "ultrapelis-page",
+      flex: 1,
+      children: [
+        busyBar(),
+        { type: "ListView", key: `ultrapelis-${nav}${query ? "-buscar" : ""}`, flex: 1, padding: { compact: { bottom: 16 }, expanded: { bottom: 24 } }, gap: 12, items: nodes },
+        searchSheet(query),
+      ],
+    },
+  };
+  if (device !== "tv") out.bottomNavigationBar = navBar(nav);
+  return out;
+}
+
+export async function screenEvent(ev) {
+  const event = ev || {};
+  const state = Object.assign({ nav: "inicio", query: "", aviso: "" }, event.state || {});
+  state.nav = navKey(state.nav);
+  const ui = [{ hide: "busy" }];
+  const name = String(event.name || "");
+
+  if (name === "nav") {
+    state.nav = navKey(event.value !== undefined ? event.value : event.arg);
+    state.query = "";
+    state.aviso = "";
+  } else if (name === "search") {
+    const dicho = event.value !== undefined
+      ? event.value
+      : event.inputs && event.inputs.sq !== undefined
+        ? event.inputs.sq
+        : event.arg;
+    state.query = String(dicho == null ? "" : dicho).trim().slice(0, 120);
+    return { ui: [{ hide: "busy" }, { close: "buscar" }], state: state };
+  } else if (name === "clearSearch") {
+    state.query = "";
+  } else if (name === "sesion") {
+    const r = await iniciarSesion();
+    state.aviso = (r && r.message) || "";
+  } else if (name === "comprobar" || name === "limpiar") {
+    try {
+      if (name === "limpiar") {
+        let n = 0;
+        const claves = kino.storage.keys ? kino.storage.keys() : [];
+        for (let i = 0; i < claves.length; i++) {
+          if (claves[i].indexOf("ok:") === 0 || claves[i].indexOf("cache:") === 0) {
+            kino.storage.remove(claves[i]);
+            n++;
+          }
+        }
+        state.aviso = "Cach\xE9 borrada (" + n + " entradas).";
+      } else {
+        const r = await action("probar");
+        state.aviso = (r && r.message) || "";
+      }
+    } catch (e) {
+      state.aviso = "No se pudo completar la acci\u00f3n.";
+    }
+  }
+  return { ui: ui, state: state };
 }
 
 // ---------------------------------------------------------------- estado y acciones de los ajustes
