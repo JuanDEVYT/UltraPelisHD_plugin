@@ -904,7 +904,10 @@ async function abrirCopia(raw) {
   return stream;
 }
 
-export async function resolve(ref) {
+// El camino con sesión del sitio: la ficha, la puerta, el pass y los servidores del reproductor.
+// Se usa para series y capítulos (el sitio no publica copias indexables) y como respaldo cuando el
+// índice no trae una copia DoodStream viva.
+async function resolverSesion(ref) {
   const raw = String(ref == null ? "" : ref);
   if (raw.indexOf("|") >= 0) return abrirCopia(raw);
 
@@ -979,10 +982,9 @@ export async function resolve(ref) {
 export async function prepare(ref) {
   const raw = String(ref == null ? "" : ref);
   if (!raw || raw.indexOf("|") >= 0) return;
-  const path = raw.replace(/^\/+/, "");
-  if (!path || leerOk(path)) return;
+  if (leerOk(raw)) return;
   try {
-    await resolve(path);
+    await resolve(raw);
   } catch (e) {
     log("prepare:", (e && e.code) || (e && e.message) || "error");
   }
@@ -990,7 +992,7 @@ export async function prepare(ref) {
 
 // ---------------------------------------------------------------- inicio, sección, categorías
 
-export async function home() {
+async function homeSitio() {
   let html = "";
   try {
     html = await get(BASE + "/", 12000);
@@ -1102,7 +1104,7 @@ async function listRow(path, title, ref) {
   return null;
 }
 
-export async function section(args) {
+async function sectionSitio(args) {
   const tab = args && args.tab;
   let chosen = TABS[0].id;
   for (let i = 0; i < TABS.length; i++) if (TABS[i].id === tab) chosen = tab;
@@ -1164,7 +1166,7 @@ export async function section(args) {
   return { tabs: TABS, tab: chosen, rows: rows };
 }
 
-export async function categories() {
+async function categoriesSitio() {
   let html = "";
   try {
     html = await get(BASE + "/genres");
@@ -1214,7 +1216,7 @@ function suggested(json, hint) {
   return out;
 }
 
-export async function search(query) {
+async function searchSitio(query) {
   const q = String((query && query.q) || "").trim();
   const cursor = query && query.cursor;
   if (cursor) {
@@ -1280,7 +1282,7 @@ export async function search(query) {
   return items;
 }
 
-export async function browse(ref, cursor) {
+async function browseSitio(ref, cursor) {
   const path = cursor || ref;
   if (!path) return { items: [] };
   const url = /^https?:\/\//.test(path) ? path : BASE + "/" + String(path).replace(/^\/+/, "");
@@ -1303,7 +1305,7 @@ function isoRuntime(iso) {
 // La ficha de una película. Devuelve también los ids que conoce (tmdb del reproductor, imdb del
 // JSON-LD) para que Kino complete la página con TMDB, y si a la página le falta sinopsis, géneros o
 // duración se lo pregunta a kino.meta (Kino pone la llave, el plugin nunca ve una).
-export async function details(ref) {
+async function detailsSitio(ref) {
   const path = String(ref == null ? "" : ref).replace(/^\/+/, "");
   if (!path) return null;
   const html = await get(BASE + "/" + path);
@@ -1355,7 +1357,7 @@ export async function details(ref) {
   return Object.keys(info).length ? info : null;
 }
 
-export async function episodes(ref) {
+async function episodesSitio(ref) {
   const path = String(ref == null ? "" : ref).replace(/^\/+/, "");
   if (!path) throw kino.error("not_found");
   const html = await get(BASE + "/" + path);
@@ -1376,7 +1378,11 @@ export async function episodes(ref) {
 // ---------------------------------------------------------------- panel del reproductor (apiVersion 9)
 
 function seriesRefOf(ref) {
-  const m = /^(.*?)\/season\/\d+\/episode\/\d+$/.exec(String(ref || ""));
+  const s = String(ref || "");
+  const ep = /^e:(\d+):\d+:\d+$/.exec(s);
+  if (ep) return "s:" + ep[1];
+  if (/^s:\d+$/.test(s)) return s;
+  const m = /^(.*?)\/season\/\d+\/episode\/\d+$/.exec(s);
   return m ? m[1] : "";
 }
 
@@ -1401,7 +1407,38 @@ async function copiesFor(ref, fresh) {
   const key = "cop:" + String(ref || "");
   const cached = kino.storage.get(key);
   if (!fresh && cached && cached.at && cached.text && Date.now() - cached.at < 300000) return cached.text;
-  const path = String(ref || "").replace(/^\/+/, "");
+
+  // Películas del índice: las copias se conocen sin abrir la puerta ni gastar la sesión.
+  const raw = String(ref || "");
+  if (/^[mse]:/.test(raw) && catReady()) {
+    try {
+      const item = await catItem(raw[0] === "e" ? "s:" + raw.split(":")[1] : raw);
+      const codes = item && item.data && typeof item.data.c === "string" ? item.data.c.split(",").filter(Boolean) : [];
+      if (codes.length) {
+        const by = new Map();
+        for (const c of codes) by.set(c[0], (by.get(c[0]) || 0) + 1);
+        const lines = [...by].map(([letter, n]) => {
+          const l = langOf(LETTERS[letter] || letter);
+          return l.flag + " " + l.name + " · " + n + (n === 1 ? " copia" : " copias");
+        });
+        const text = lines.join("\n");
+        if (text) {
+          try { kino.storage.set(key, { at: Date.now(), text: text }); } catch (e) {}
+          return text;
+        }
+      }
+    } catch (e) {
+      log("panel: no se pudo leer el índice:", (e && e.code) || "error");
+    }
+  }
+
+  let path = raw.replace(/^\/+/, "");
+  if (/^[mse]:/.test(raw)) {
+    try {
+      const item = await catItem(raw[0] === "e" ? "s:" + raw.split(":")[1] : raw);
+      path = await sessionPathOf(raw, item);
+    } catch (e) {}
+  }
   if (!path) return "";
   const pageUrl = BASE + "/" + path;
   const fuentes = await fuentesDe(pageUrl, Date.now() + 8000);
@@ -1667,6 +1704,7 @@ async function busquedaNodes(query) {
 async function ajustesNodes(state) {
   const out = [];
   if (state && state.aviso) out.push({ type: "MaterialBanner", key: "aviso", role: "info", margin: borde, text: String(state.aviso), textEn: String(state.aviso) });
+  out.push(indexCard());
   let estado = "Sin comprobaci\u00f3n todav\xEDa";
   try {
     const st = await settingsStatus();
@@ -1709,7 +1747,7 @@ async function ajustesNodes(state) {
     wrap: true,
     margin: borde,
     children: [
-      { type: "TextButton", key: "aj-sesion", icon: "login", labelText: "Iniciar sesi\u00f3n", labelTextEn: "Sign in", onPressed: busyEvent("sesion") },
+      { type: "TextButton", key: "aj-sesion", icon: "person", labelText: "Iniciar sesi\u00f3n", labelTextEn: "Sign in", onPressed: busyEvent("sesion") },
       { type: "TextButton", key: "aj-comprobar", icon: "refresh", labelText: "Comprobar el sitio", labelTextEn: "Check the site", onPressed: busyEvent("comprobar") },
       { type: "TextButton", key: "aj-limpiar", icon: "delete", labelText: "Borrar la cach\xE9", labelTextEn: "Clear cache", onPressed: busyEvent("limpiar") },
     ],
@@ -1768,6 +1806,8 @@ async function iniciarSesion() {
 export async function screen(arg) {
   const state = (arg && arg.state) || {};
   const device = (arg && arg.device) || "phone";
+  // Una importación en curso (o recién empezada) manda: su barra y su tick, sin tocar la red aquí.
+  if (state.indexing || indexing()) return indexView(state, device);
   const nav = navKey(state.nav);
   const query = typeof state.query === "string" ? state.query.trim().slice(0, 120) : "";
 
@@ -1807,6 +1847,39 @@ export async function screenEvent(ev) {
   state.nav = navKey(state.nav);
   const ui = [{ hide: "busy" }];
   const name = String(event.name || "");
+
+  // Descarga e importación del índice: un trozo por evento, con su barra.
+  if (name === "index" || name === "indexTick") {
+    try {
+      if (name === "index") {
+        const r = await indexStart(false);
+        if (r.upToDate) {
+          state.indexing = false;
+          state.aviso = "El índice ya está al día (" + r.version + ").";
+          return { ui, state };
+        }
+      }
+      const t = await indexTick();
+      if (t.done) {
+        state.indexing = false;
+        state.aviso = "Índice listo (" + t.version + ").";
+      } else if (t.failed) {
+        state.indexing = false;
+        state.aviso = "No se pudo descargar el catálogo. Revisa la conexión y reinténtalo.";
+      } else {
+        state.indexing = true;
+        state.indexPart = t.part;
+        state.indexShards = t.shards;
+        state.indexSeen = t.seen;
+        state.indexTotal = t.total || 0;
+      }
+    } catch (e) {
+      log("index:", (e && e.code) || (e && e.message) || "error");
+      state.indexing = false;
+      state.aviso = (e && e.userMessage) || "No se pudo descargar el índice.";
+    }
+    return { ui, state };
+  }
 
   if (name === "nav") {
     state.nav = navKey(event.value !== undefined ? event.value : event.arg);
@@ -1874,11 +1947,23 @@ export async function settingsStatus() {
   if (fetchError && fetchError.text) parts.push("Último error: " + fetchError.text);
   return {
     estado: estado,
+    indice: indexInfo().text,
     ultimo: (parts.join(" · ") || "Aún no hay lecturas registradas.").slice(0, 200),
   };
 }
 
 export async function action(key) {
+  if (key === "indice") {
+    try {
+      const r = await indexStart(false);
+      if (r.upToDate) return { message: "El índice ya está al día (" + r.version + ")." };
+      const t = await indexTick();
+      if (t && t.done) return { message: "Índice listo (" + t.version + ")." };
+      return { message: "Descargando el catálogo… abre la pantalla del plugin para seguir el avance." };
+    } catch (e) {
+      return { message: (e && e.userMessage) || "No se pudo descargar el índice." };
+    }
+  }
   if (key !== "probar") return null;
   const started = Date.now();
   let status = 0;
@@ -1917,4 +2002,906 @@ export async function action(key) {
       300,
     ),
   };
+}
+// ================================================================ índice de reproducción
+//
+// El sitio entrega las copias de sus películas detrás de una puerta que pide cuenta. Para que las
+// películas se vean sin cuenta, el plugin trae un índice publicado en el release `catalog` de este
+// repositorio: por película, su ruta en el sitio y los códigos de sus copias DoodStream. Se importa
+// a kino.catalog (una fila por título), se refresca por deltas y un job de fondo deja preparada la
+// actualización. Títulos, pósters, sinopsis y episodios salen de TMDB.
+//
+// Las series y sus capítulos no publican copia indexable: su reproducción sigue yendo por la sesión
+// del sitio (ficha → puerta → pass → servidores), que es lo que hacía la 1.5.0.
+
+const ASSET_BASE = "https://github.com/JuanDEVYT/UltraPelisHD_plugin/releases/download/catalog";
+const CAT_REFRESH_MS = 6 * 3600 * 1000;
+const JOB_STORE_CAP = 250000;
+const UPSERT_BATCH = 500;
+const CK = {
+  ver: "catVersion", at: "catAt", target: "catTarget", shards: "catShards", part: "catPart",
+  seen: "catSeen", total: "catTotal", recentM: "catRecentM", recentS: "catRecentS",
+  pending: "catPending", hosts: "catHosts",
+};
+
+const sGet = (k) => { try { return kino.storage.get(k); } catch { return null; } };
+const sSet = (k, v) => { try { kino.storage.set(k, v); } catch { /* storage lleno: se sigue sin eso */ } };
+const sDel = (k) => { try { kino.storage.remove(k); } catch { /* nada que borrar */ } };
+const parseList = (raw) => { try { return JSON.parse(raw || "[]"); } catch { return []; } };
+
+/** El catálogo ya está importado (o hay algo usable en él). */
+const catReady = () => !!sGet(CK.ver) || catRecentIds("movies").length > 0;
+/** Una importación está en curso (se reanuda sola al abrir la pantalla). */
+const indexing = () => !!sGet(CK.shards);
+
+/** Líneas compactas del catálogo → filas de kino.catalog. Una película es `m:<tmdb>`, una serie `s:<tmdb>`. */
+function linesToItems(movies, series) {
+  const items = [];
+  const recentMovies = [];
+  const recentSeries = [];
+  let rank = 1000000;
+  for (const line of String(movies || "").split("\n")) {
+    const [id, path, codes] = line.split("|");
+    if (!/^\d+$/.test(id || "")) continue;
+    const data = { p: String(path || "") };
+    if (codes) data.c = codes;
+    items.push({ id: "m:" + id, title: "", sort: rank--, data });
+    recentMovies.push("m:" + id);
+  }
+  for (const line of String(series || "").split("\n")) {
+    const [id, path] = line.split("|");
+    if (!/^\d+$/.test(id || "")) continue;
+    items.push({ id: "s:" + id, title: "", sort: rank--, data: { p: String(path || "") } });
+    recentSeries.push("s:" + id);
+  }
+  return { items, recentMovies, recentSeries };
+}
+
+function appendRecent(key, ids) {
+  if (!ids.length) return;
+  sSet(key, JSON.stringify(parseList(sGet(key)).concat(ids)));
+}
+
+/** Importa un trozo entero (todas sus tandas de 500) y acumula los "recién agregados". */
+async function importShard(shard) {
+  const { items, recentMovies, recentSeries } = linesToItems(shard.movies, shard.series);
+  for (let i = 0; i < items.length; i += UPSERT_BATCH) await kino.catalog.upsert(items.slice(i, i + UPSERT_BATCH));
+  appendRecent(CK.recentM, recentMovies);
+  appendRecent(CK.recentS, recentSeries);
+  if (Array.isArray(shard.hosts) && shard.hosts.length) sSet(CK.hosts, JSON.stringify(shard.hosts));
+  return items.length;
+}
+
+// ---- descarga del release ----
+
+async function fetchJson(url) {
+  try {
+    const r = await kino.fetch(url, { timeoutMs: 15000 });
+    if (!r || !r.ok) return null;
+    return JSON.parse(await r.text());
+  } catch { return null; }
+}
+
+/** El testigo pequeño con la versión publicada y sus trozos, o null (sin red / sin publicar). */
+const fetchVersion = () => fetchJson(ASSET_BASE + "/catalog.version.json");
+const fetchShard = (name) => fetchJson(ASSET_BASE + "/" + encodeURIComponent(name));
+/** El delta desde `from`, o null cuando no existe (404) → se cae al catálogo completo. */
+const fetchDelta = (from) => (from ? fetchJson(ASSET_BASE + "/delta/" + encodeURIComponent(from) + ".json") : null);
+
+// ---- importación por tandas (reanudable) ----
+
+/**
+ * Empieza una importación completa: vacía kino.catalog y deja apuntados la versión y sus trozos.
+ * Cada `indexTick` baja un trozo; así ninguna llamada se pasa del tiempo de Kino.
+ */
+async function indexStart(force) {
+  const v = await fetchVersion();
+  if (!v || typeof v.version !== "string") {
+    throw kino.error("unavailable", "índice sin publicar", {
+      userMessage: "Todavía no hay un índice publicado. Vuelve a intentarlo más tarde.",
+    });
+  }
+  const local = sGet(CK.ver);
+  if (!force && local === v.version) {
+    let count = 0;
+    try { count = await kino.catalog.count(); } catch { count = 0; }
+    if (count > 0) return { upToDate: true, version: v.version };
+  }
+  const shards = (Array.isArray(v.shards) ? v.shards : []).map((x) => (typeof x === "string" ? x : x && x.name)).filter(Boolean);
+  if (!shards.length) {
+    throw kino.error("unavailable", "índice sin trozos", {
+      userMessage: "El índice publicado está incompleto. Vuelve a intentarlo más tarde.",
+    });
+  }
+  await kino.catalog.clear();
+  sSet(CK.target, v.version);
+  sSet(CK.shards, JSON.stringify(shards));
+  sSet(CK.part, "0");
+  sSet(CK.seen, "0");
+  sSet(CK.total, String((Number(v.movies) || 0) + (Number(v.series) || 0)));
+  sDel(CK.recentM);
+  sDel(CK.recentS);
+  sDel(CK.ver);
+  log("índice:", "empieza la importación de", v.version, "·", shards.length, "trozo(s)");
+  return { started: true, version: v.version, shards: shards.length };
+}
+
+function indexFinish() {
+  const version = sGet(CK.target) || "";
+  if (version) sSet(CK.ver, version);
+  sSet(CK.at, String(Date.now()));
+  sDel(CK.shards);
+  sDel(CK.part);
+  sDel(CK.seen);
+  sDel(CK.total);
+  sDel(CK.target);
+  log("índice:", version, "importado");
+  return { done: true, version };
+}
+
+/** Baja e importa el trozo pendiente. Devuelve el avance o {done}. */
+async function indexTick() {
+  const shards = parseList(sGet(CK.shards));
+  const part = Number(sGet(CK.part)) || 0;
+  if (!Array.isArray(shards) || !shards.length || part >= shards.length) return indexFinish();
+  const shard = await fetchShard(shards[part]);
+  if (!shard) return { failed: true, part, shards: shards.length };
+  const n = await importShard(shard);
+  const seen = (Number(sGet(CK.seen)) || 0) + n;
+  sSet(CK.part, String(part + 1));
+  sSet(CK.seen, String(seen));
+  if (part + 1 >= shards.length) return indexFinish();
+  return { part: part + 1, shards: shards.length, seen, total: Number(sGet(CK.total)) || 0 };
+}
+
+/** Lo que la pantalla necesita para dibujar el avance, sin tocar la red. */
+function indexSnapshot() {
+  const shards = parseList(sGet(CK.shards));
+  return {
+    indexing: shards.length > 0,
+    indexPart: Number(sGet(CK.part)) || 0,
+    indexShards: shards.length,
+    indexSeen: Number(sGet(CK.seen)) || 0,
+    indexTotal: Number(sGet(CK.total)) || 0,
+  };
+}
+
+/** Aplica un delta publicado: quita lo que ya no está, añade lo nuevo y mueve los marcadores. */
+async function applyDelta(delta) {
+  const remove = Array.isArray(delta.remove) ? delta.remove : [];
+  for (let i = 0; i < remove.length; i += 500) {
+    try { await kino.catalog.remove(remove.slice(i, i + 500)); } catch { /* ids que no estaban */ }
+  }
+  const { items, recentMovies, recentSeries } = linesToItems(delta.addMovies || "", delta.addSeries || "");
+  for (let i = 0; i < items.length; i += UPSERT_BATCH) await kino.catalog.upsert(items.slice(i, i + UPSERT_BATCH));
+  const gone = new Set(remove);
+  const merge = (key, news) => {
+    const old = parseList(sGet(key));
+    const have = new Set(old);
+    sSet(key, JSON.stringify(news.filter((id) => !have.has(id)).concat(old.filter((id) => !gone.has(id)))));
+  };
+  merge(CK.recentM, recentMovies);
+  merge(CK.recentS, recentSeries);
+  if (delta.version) sSet(CK.ver, delta.version);
+  sSet(CK.at, String(Date.now()));
+  log("índice: delta aplicado ·", (delta.addMovies || "").split("\n").filter(Boolean).length, "películas,", (delta.addSeries || "").split("\n").filter(Boolean).length, "series");
+}
+
+/** Lo que el job dejó preparado: un delta o el aviso de que toca el catálogo completo. */
+async function applyPending() {
+  const raw = sGet(CK.pending);
+  if (!raw) return false;
+  sDel(CK.pending);
+  let payload = null;
+  try { payload = JSON.parse(raw); } catch { return false; }
+  if (payload.kind === "delta" && payload.data) { await applyDelta(payload.data); return true; }
+  if (payload.kind === "full") { await indexStart(true); return true; }
+  return false;
+}
+
+/** Al abrir: si la copia local tiene más de seis horas, se pone al día (delta, o catálogo completo). */
+async function ensureFresh() {
+  if (!sGet(CK.ver) || indexing()) return;
+  const at = Number(sGet(CK.at)) || 0;
+  if (at && Date.now() - at < CAT_REFRESH_MS) return;
+  const latest = await fetchVersion();
+  if (!latest || typeof latest.version !== "string") return;
+  if (latest.version === sGet(CK.ver)) { sSet(CK.at, String(Date.now())); return; }
+  const delta = await fetchDelta(sGet(CK.ver));
+  if (delta && delta.version === latest.version) { await applyDelta(delta); return; }
+  await indexStart(true);
+}
+
+/**
+ * Job de fondo (cada 6 h): deja en kino.storage el delta pendiente, o el aviso de catálogo completo.
+ * kino.catalog no se puede tocar desde un job: la importación la hace la pantalla al abrirse.
+ */
+export async function job() {
+  const latest = await fetchVersion();
+  if (!latest || typeof latest.version !== "string") return;
+  const current = sGet(CK.ver);
+  if (!current || current === latest.version) return;
+  const delta = await fetchDelta(current);
+  if (delta && delta.version === latest.version) {
+    const json = JSON.stringify({ kind: "delta", data: delta });
+    if (json.length <= JOB_STORE_CAP) { sSet(CK.pending, json); return; }
+  }
+  sSet(CK.pending, JSON.stringify({ kind: "full", version: latest.version }));
+}
+
+// ---- lecturas del catálogo ----
+
+async function catGet(ids) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += 500) out.push(...(await kino.catalog.get(ids.slice(i, i + 500))));
+  return out;
+}
+
+async function catItem(ref) {
+  const [it] = await catGet([String(ref)]);
+  return it || null;
+}
+
+async function catHas(ids) {
+  return new Set((await catGet(ids)).map((it) => it.id));
+}
+
+function catRecentIds(kind) {
+  const raw = sGet(kind === "series" ? CK.recentS : CK.recentM);
+  try { return raw ? JSON.parse(raw) : []; } catch { return []; }
+}
+
+const hostsList = () => parseList(sGet(CK.hosts));
+
+// ================================================================ TMDB (títulos, pósters, fichas)
+
+const IMG = "https://image.tmdb.org/t/p/";
+const img = (size, p) => (p ? IMG + size + p : undefined);
+const tmdbLang = () => (String(kino.lang || kino.language || "es").slice(0, 2).toLowerCase() === "en" ? "en-US" : "es-MX");
+const yearOf = (d) => (typeof d === "string" && /^\d{4}/.test(d) ? Number(d.slice(0, 4)) : undefined);
+const DAY = 24 * 3600 * 1000;
+
+async function tmdb(path, params = {}) {
+  try {
+    return await kino.tmdb(path, { language: tmdbLang(), ...params });
+  } catch (e) {
+    if (e && e.code === "not_found") {
+      throw kino.error("not_found", "tmdb 404 " + path, { userMessage: "No encontramos ese título." });
+    }
+    if (e && e.userMessage) throw e;
+    throw kino.error("unavailable", "tmdb " + path + " " + (e && e.code), {
+      userMessage: "No se pudo consultar el catálogo. Revisa la conexión e inténtalo de nuevo.",
+    });
+  }
+}
+
+function tGet(key) {
+  try {
+    const hit = kino.storage.get("t:" + key);
+    if (hit && hit.at && hit.value) return hit.value;
+  } catch { /* sin caché */ }
+  return null;
+}
+function tSet(key, value, ttlMs) {
+  try { kino.storage.set("t:" + key, { at: Date.now(), value }, { ttlMs }); } catch { /* lleno */ }
+}
+
+/** Solo lo que una tarjeta necesita; `tv` marca serie. */
+const slim = (m, tv) => ({
+  id: m.id,
+  tv: tv ? 1 : 0,
+  title: (tv ? m.name || m.original_name : m.title || m.original_title) || "",
+  poster_path: m.poster_path,
+  backdrop_path: m.backdrop_path,
+  date: tv ? m.first_air_date : m.release_date,
+  vote_average: m.vote_average,
+});
+
+function card(m, ref) {
+  const tv = !!m.tv;
+  return {
+    id: (tv ? "s" : "m") + m.id,
+    ref: ref || (tv ? "s:" : "m:") + m.id,
+    title: m.title,
+    kind: tv ? "series" : "movie",
+    year: yearOf(m.date),
+    poster: img("w342", m.poster_path),
+    backdrop: img("w780", m.backdrop_path),
+    rating: m.vote_average ? Math.round(m.vote_average * 10) / 10 : undefined,
+    ids: { tmdb: m.id },
+  };
+}
+
+async function movieFor(id) {
+  const key = "mv:" + tmdbLang() + ":" + id;
+  const hit = tGet(key);
+  if (hit) return hit;
+  let m = null;
+  try { m = await tmdb("/movie/" + id); } catch { return null; }
+  if (!m) return null;
+  const out = slim(m, false);
+  tSet(key, out, 14 * DAY);
+  return out;
+}
+
+async function showFor(id) {
+  const key = "tv:" + tmdbLang() + ":" + id;
+  const hit = tGet(key);
+  if (hit) return hit;
+  let m = null;
+  try { m = await tmdb("/tv/" + id); } catch { return null; }
+  const out = slim(m, true);
+  tSet(key, out, 14 * DAY);
+  return out;
+}
+
+/** Una página de una lista de TMDB reducida a lo que está en el índice (cacheada 6 h). */
+async function listPage(path, params, page, tv) {
+  const key = "pg:" + tmdbLang() + ":" + path + ":" + JSON.stringify(params) + ":" + page;
+  const hit = tGet(key);
+  if (hit) return hit;
+  const data = await tmdb(path, { ...params, page });
+  const results = (data.results || []).filter((m) => m.poster_path);
+  const present = await catHas(results.map((m) => (tv ? "s:" : "m:") + m.id));
+  const out = {
+    total: Math.min(data.total_pages || 1, 500),
+    hits: results.filter((m) => present.has((tv ? "s:" : "m:") + m.id)).map((m) => slim(m, tv)),
+  };
+  tSet(key, out, DAY / 4);
+  return out;
+}
+
+const PAGE = 20;
+const MAX_TMDB_PAGES = 6;
+const HOME_RECENT = 6;
+
+const LISTS = {
+  trending: { path: "/trending/movie/week", tv: false, es: "Películas en tendencia", en: "Trending movies" },
+  trendingTv: { path: "/trending/tv/week", tv: true, es: "Series en tendencia", en: "Trending series" },
+  popular: { path: "/movie/popular", tv: false, es: "Películas populares", en: "Popular movies" },
+  popularTv: { path: "/tv/popular", tv: true, es: "Series populares", en: "Popular series" },
+  now: { path: "/movie/now_playing", tv: false, es: "Estrenos", en: "New releases" },
+  top: { path: "/movie/top_rated", tv: false, es: "Películas mejor valoradas", en: "Top rated movies" },
+  topTv: { path: "/tv/top_rated", tv: true, es: "Series mejor valoradas", en: "Top rated series" },
+};
+
+const ANIME = { with_genres: 16, with_original_language: "ja", sort_by: "popularity.desc" };
+const ANIME_LISTS = {
+  animeAiring: { path: "/discover/tv", params: () => ({ ...ANIME, "air_date.gte": isoDay(Date.now() - 7 * 86400000), "air_date.lte": isoDay(Date.now()), "vote_count.gte": 10 }), tv: true, es: "Anime en emisión", en: "Airing anime" },
+  anime: { path: "/discover/tv", params: () => ({ ...ANIME, "vote_count.gte": 50 }), tv: true, es: "Anime popular", en: "Popular anime" },
+  animeMovies: { path: "/discover/movie", params: () => ({ ...ANIME, "vote_count.gte": 50 }), tv: false, es: "Películas de anime", en: "Anime movies" },
+};
+const DORAMAS = {
+  doramas: { path: "/discover/tv", params: () => ({ with_original_language: "ko", sort_by: "popularity.desc", "vote_count.gte": 30 }), tv: true, es: "Doramas populares", en: "Popular K-dramas" },
+  doramasTop: { path: "/discover/tv", params: () => ({ with_original_language: "ko", sort_by: "vote_average.desc", "vote_count.gte": 80 }), tv: true, es: "Doramas mejor valorados", en: "Top rated K-dramas" },
+};
+const titleOfList = (def) => (String(kino.lang || "es").slice(0, 2).toLowerCase() === "en" ? def.en : def.es);
+const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+/** Camina páginas de TMDB desde [startPage] quedándose con los títulos del índice, hasta [PAGE]. */
+async function filtered(path, params, startPage, tv, maxPages = MAX_TMDB_PAGES) {
+  const items = [];
+  let page = startPage;
+  let total = 1;
+  for (let n = 0; n < maxPages && items.length < PAGE; n++, page++) {
+    const data = await listPage(path, params, page, tv);
+    total = data.total;
+    for (const m of data.hits) items.push(card(m));
+    if (page >= total) return { items, next: undefined };
+  }
+  return { items, next: String(page) };
+}
+
+/** Chips de idioma de una película del índice (Latino/Subtitulado; Castellano es lo común). */
+function badgesOf(codes) {
+  const set = new Set(String(codes || "").split(",").filter(Boolean).map((c) => c[0]));
+  const b = [];
+  if (set.has("L")) b.push("Latino");
+  if (set.has("S")) b.push("Sub");
+  return b;
+}
+
+/** Prefijos del índice → tarjetas con póster de TMDB y su chip de idioma. */
+async function idsToItems(ids, tv) {
+  const found = await Promise.all(ids.map((id) => (tv ? showFor : movieFor)(id.slice(2))));
+  const codes = new Map();
+  try {
+    const rows = await catGet(ids);
+    for (const it of rows) if (it && it.data && typeof it.data.c === "string") codes.set(it.id, it.data.c);
+  } catch { /* sin chips */ }
+  const items = [];
+  found.forEach((m, i) => {
+    if (!m || !m.poster_path) return;
+    const c = card(m, ids[i]);
+    const b = codes.has(ids[i]) ? badgesOf(codes.get(ids[i])) : [];
+    if (b.length) c.badges = b;
+    items.push(c);
+  });
+  return items;
+}
+
+/** Los recién agregados en el orden del índice (más nuevos primero). */
+async function recent(cursor, size, tv) {
+  const ids = catRecentIds(tv ? "series" : "movies");
+  const from = Math.max(0, parseInt(cursor || "0", 10) || 0);
+  const items = await idsToItems(ids.slice(from, from + size), tv);
+  return { items, next: from + size < ids.length ? String(from + size) : undefined };
+}
+
+/** Una fila de lista de TMDB con lo que hay en el índice, para el Inicio y las secciones. */
+async function rowOf(def, startPage = 1, maxPages = 1) {
+  const r = await filtered(def.path, typeof def.params === "function" ? def.params() : {}, startPage, !!def.tv, maxPages);
+  return { title: titleOfList(def), items: r.items, next: r.next };
+}
+
+// ================================================================ puertas de reproducción
+
+/** El motor compartido (xuper-plugin/kino-plugin-kino-resolver) resuelve el embed de DoodStream. */
+async function viaResolver(embedUrl) {
+  let res;
+  try {
+    res = await kino.plugins.call("resolver", "resolve", { url: embedUrl, referer: BASE + "/" });
+  } catch (e) {
+    if (e && e.code === "provider_missing") {
+      const err = kino.error("unavailable", "falta el motor de reproducción", {
+        userMessage: "Instala el motor de reproducción (gratis) desde el menú del plugin para ver sin cuenta, o inicia sesión en Ajustes.",
+      });
+      try { err.resolverMissing = true; } catch { /* sellado */ }
+      throw err;
+    }
+    throw kino.error("unavailable", "motor: " + ((e && e.code) || "falló") + " " + embedUrl);
+  }
+  const s = (res && Array.isArray(res.streams) ? res.streams : []).find((x) => x && x.url);
+  if (!s) throw kino.error("unavailable", "sin flujo: " + embedUrl);
+  const headers = {};
+  if (s.referer) headers.Referer = s.referer;
+  if (Array.isArray(s.headers)) {
+    for (const h of s.headers) if (h && h.name) headers[h.name] = String(h.value);
+  } else if (s.headers && typeof s.headers === "object") Object.assign(headers, s.headers);
+  return { url: s.url, mime: s.kind === "hls" ? HLS : "video/mp4", headers, expiresInSeconds: 3600 };
+}
+
+const LETTERS = { L: "LAT", E: "ESP", S: "SUB", I: "ENG", O: "" };
+const labelOfSlot = (slot) => {
+  const l = langOf(LETTERS[slot[0]] || slot[0]);
+  return l.flag + " " + l.name + " · DoodStream";
+};
+
+/** Una copia del índice: `L0e/abc123` = idioma, índice de host, camino en el host. */
+async function playSlot(slot) {
+  const host = hostsList()[parseInt(String(slot).slice(1, 2), 16)];
+  const rest = String(slot).slice(2);
+  if (!host || !rest) throw kino.error("invalid_request", "copia inválida: " + slot);
+  return viaResolver("https://" + host + "/" + rest);
+}
+
+// Copias que ya fallaron en este aparato: no se reintentan durante una semana.
+const DEAD_MS = 7 * 24 * 3600 * 1000;
+let deadSet = null;
+function deadSlots() {
+  if (deadSet) return deadSet;
+  deadSet = new Set(parseList(sGet("deadSlots")));
+  return deadSet;
+}
+function markDeadSlot(slot) {
+  const set = deadSlots();
+  if (set.has(slot)) return;
+  set.add(slot);
+  try { kino.storage.set("deadSlots", JSON.stringify([...set].slice(-4000)), { ttlMs: DEAD_MS }); } catch { /* lleno */ }
+}
+
+/** El idioma preferido primero; luego Latino, Castellano, Subtitulado, Inglés. */
+function rankCodes(codes) {
+  const pref = String(kino.config.get("lang") || "auto").toUpperCase();
+  const want = { LAT: "L", ESP: "E", SUB: "S", ENG: "I" }[pref] || "";
+  const at = (c) => ("LESI".indexOf(c[0]) >= 0 ? "LESI".indexOf(c[0]) : 4);
+  return [...codes].sort((a, b) => (a[0] === want ? 0 : 10) + at(a) - ((b[0] === want ? 0 : 10) + at(b)));
+}
+
+/** La ruta del sitio de un ref del índice: la ficha tal cual, o el capítulo por su temporada y número. */
+async function sessionPathOf(ref, item) {
+  const base = String((item && item.data && item.data.p) || "").replace(/^\/+/, "");
+  if (!base || ref[0] !== "e") return base;
+  const [, season, episode] = String(ref).split(":");
+  const s = Number(season) || 1;
+  const e = Number(episode) || 1;
+  try {
+    const html = await get(BASE + "/" + base);
+    const list = episodesOf(html);
+    const hit = list.find((x) => x.season === s && x.number === e) || list.filter((x) => x.season === s)[e - 1];
+    if (hit && hit.ref) return hit.ref;
+  } catch (err) {
+    log("capítulo:", "no se pudo leer la lista del sitio:", (err && err.code) || (err && err.message) || "error");
+  }
+  return base + "/season/" + s + "/episode/" + e;
+}
+
+// ================================================================ resolve
+
+/**
+ * Reproduce un ref del índice: primero las copias DoodStream indexadas (sin cuenta); si no hay o
+ * ninguna carga, el camino con sesión del sitio (series, capítulos y respaldo).
+ */
+export async function resolve(ref) {
+  const raw = String(ref == null ? "" : ref);
+  if (!raw) throw kino.error("not_found");
+
+  // Una copia concreta del menú Servidor (`c:<slot>`).
+  const lazy = /^c:([A-Za-z0-9]{6,80})$/.exec(raw);
+  if (lazy) {
+    try { return await playSlot(lazy[1]); } catch (e) {
+      if (e && e.resolverMissing) throw e;
+      markDeadSlot(lazy[1]);
+      throw kino.error("unavailable", "la copia no cargó", { userMessage: "Esa copia ya no está disponible. Elige otra en el menú Servidor." });
+    }
+  }
+
+  // Refs viejos (ruta del sitio o "ruta|servidor"): directo por la sesión.
+  if (raw.indexOf("|") >= 0 || !/^[mse]:/.test(raw)) return resolverSesion(raw);
+
+  const seriesId = raw[0] === "e" ? "s:" + String(raw).split(":")[1] : raw;
+  let item = null;
+  try { item = await catItem(seriesId); } catch { item = null; }
+  if (!item) {
+    throw kino.error("not_found", "no está en el índice: " + raw, {
+      userMessage: "Este título no está en el índice del plugin. Actualízalo en Ajustes ▸ UltraPelisHD.",
+    });
+  }
+
+  const codes = raw[0] === "m" && item.data && typeof item.data.c === "string" ? item.data.c.split(",").filter(Boolean) : [];
+  if (codes.length) {
+    const hasta = Date.now() + RESOLVE_MS;
+    const guardado = leerOk(raw);
+    if (guardado && (await vivo(guardado.url, guardado.headers, hasta))) return guardado;
+    if (guardado) borrarOk(raw);
+    const list = rankCodes(codes.filter((c) => !deadSlots().has(c)));
+    for (let i = 0; i < Math.min(list.length, 3); i++) {
+      const slot = list[i];
+      try {
+        const stream = await playSlot(slot);
+        const rest = list.filter((c) => c !== slot);
+        const out = {
+          ...stream,
+          label: labelOfSlot(slot),
+          ...(rest.length ? { alternatives: rest.slice(0, MAX_ALTERNATIVAS).map((c) => ({ label: labelOfSlot(c), ref: "c:" + c })) } : {}),
+        };
+        guardarOk(raw, out);
+        log("resolve:", raw, "->", out.label);
+        return out;
+      } catch (e) {
+        if (e && e.resolverMissing) break; // sin motor: se intenta la sesión, que no lo necesita
+        markDeadSlot(slot);
+        log("copia muerta:", slot, (e && e.code) || (e && e.message) || "error");
+      }
+    }
+  }
+
+  // Sesión del sitio: la ficha (o el capítulo) y su puerta.
+  const path = await sessionPathOf(raw, item);
+  if (!path) throw kino.error("not_found", "sin ruta en el sitio: " + raw);
+  return resolverSesion(path);
+}
+
+// ================================================================ filas del catálogo
+
+export async function home() {
+  if (!catReady()) return homeSitio();
+  if (indexing()) return [];
+  try { await applyPending(); await ensureFresh(); } catch (e) { log("home: refresco falló:", (e && e.code) || (e && e.message) || "error"); }
+  if (indexing()) return [];
+  const defs = [
+    ["recent", () => recent(null, HOME_RECENT, false)],
+    ["recentTv", () => recent(null, HOME_RECENT, true)],
+    ...Object.keys(ANIME_LISTS).map((id) => [id, () => rowOf(ANIME_LISTS[id])]),
+    ...["trending", "trendingTv", "popular", "popularTv"].map((id) => [id, () => rowOf(LISTS[id])]),
+  ];
+  const settled = await Promise.allSettled(defs.map(([, fn]) => fn()));
+  const rows = [];
+  settled.forEach((r, i) => {
+    if (r.status !== "fulfilled" || !r.value || !r.value.items.length) return;
+    const id = defs[i][0];
+    const tv = id === "recentTv" || !!(LISTS[id] && LISTS[id].tv) || !!(ANIME_LISTS[id] && ANIME_LISTS[id].tv);
+    const title = id === "recent" ? "Películas recién agregadas" : id === "recentTv" ? "Series recién agregadas" : titleOfList(ANIME_LISTS[id] || LISTS[id]);
+    rows.push({
+      id: "row-" + rowSlug(id),
+      title,
+      ref: "browse:" + id,
+      items: r.value.items,
+      genre: id.startsWith("anime") ? "anime" : tv ? "series" : "peliculas",
+    });
+  });
+  if (!rows.length) return homeSitio();
+  log("home (índice):", rows.length, "filas,", countItems(rows), "títulos");
+  return rows;
+}
+
+export async function section(args) {
+  if (!catReady()) return sectionSitio(args);
+  const tab = args && args.tab;
+  const chosen = TABS.some((t) => t.id === tab) ? tab : TABS[0].id;
+  let defs;
+  if (chosen === "peliculas") defs = [["recent", () => recent(null, PAGE, false)], ["trending", () => rowOf(LISTS.trending, 1, 2)], ["popular", () => rowOf(LISTS.popular, 1, 2)], ["top", () => rowOf(LISTS.top)], ["now", () => rowOf(LISTS.now)]];
+  else if (chosen === "series") defs = [["recentTv", () => recent(null, PAGE, true)], ["trendingTv", () => rowOf(LISTS.trendingTv, 1, 2)], ["popularTv", () => rowOf(LISTS.popularTv, 1, 2)], ["topTv", () => rowOf(LISTS.topTv)]];
+  else if (chosen === "anime") defs = Object.keys(ANIME_LISTS).map((id) => [id, () => rowOf(ANIME_LISTS[id], 1, 2)]);
+  else defs = Object.keys(DORAMAS).map((id) => [id, () => rowOf(DORAMAS[id], 1, 2)]);
+  const settled = await Promise.allSettled(defs.map(([, fn]) => fn()));
+  const rows = [];
+  settled.forEach((r, i) => {
+    if (r.status === "fulfilled" && r.value && r.value.items.length) {
+      const def = ANIME_LISTS[defs[i][0]] || DORAMAS[defs[i][0]] || LISTS[defs[i][0]];
+      rows.push({ id: "row-" + rowSlug(defs[i][0]), title: r.value.title || (def && titleOfList(def)) || defs[i][0], ref: "browse:" + defs[i][0], items: r.value.items });
+    }
+  });
+  if (!rows.length) return sectionSitio(args);
+  log("section (índice)", chosen, "->", rows.length, "filas,", countItems(rows), "títulos");
+  return { tabs: TABS, tab: chosen, rows };
+}
+
+export async function categories() {
+  if (!catReady()) return categoriesSitio();
+  try {
+    const [movies, tv] = await Promise.all([tmdb("/genre/movie/list"), tmdb("/genre/tv/list")]);
+    const out = [];
+    const seen = new Set();
+    for (const g of [...((movies && movies.genres) || []), ...((tv && tv.genres) || [])]) {
+      if (!g || !g.id || seen.has(g.name)) continue;
+      seen.add(g.name);
+      out.push({ id: "g" + g.id, title: String(g.name).slice(0, 40), ref: "browse:genre:" + g.id });
+    }
+    if (out.length) return out.slice(0, 24);
+  } catch (e) {
+    log("categories:", (e && e.code) || "error");
+  }
+  return categoriesSitio();
+}
+
+export async function browse(ref, cursor) {
+  const raw = String(ref || "");
+  if (!catReady() || !/^browse:/.test(raw)) return browseSitio(ref, cursor);
+  const parts = raw.split(":");
+  const page = Math.max(1, parseInt(cursor || "1", 10) || 1);
+  if (parts[1] === "recent") return recent(cursor, PAGE, false);
+  if (parts[1] === "recentTv") return recent(cursor, PAGE, true);
+  if (parts[1] === "genre" && /^\d+$/.test(parts[2] || "")) {
+    return filtered("/discover/movie", { with_genres: parts[2], sort_by: "popularity.desc", "vote_count.gte": 20 }, page, false);
+  }
+  const def = LISTS[parts[1]] || ANIME_LISTS[parts[1]] || DORAMAS[parts[1]];
+  if (!def) return browseSitio(ref, cursor);
+  return filtered(def.path, typeof def.params === "function" ? def.params() : {}, page, !!def.tv);
+}
+
+export async function search(query) {
+  if (!catReady()) return searchSitio(query);
+  const q = String((typeof query === "string" ? query : (query && query.q) || "")).trim();
+  if (!q) return [];
+  try {
+    const asks = [
+      ...[1, 2, 3].map((page) => [false, tmdb("/search/movie", { query: q, include_adult: false, page })]),
+      ...[1, 2].map((page) => [true, tmdb("/search/tv", { query: q, include_adult: false, page })]),
+    ];
+    const pages = await Promise.allSettled(asks.map(([, p]) => p));
+    const cand = [];
+    pages.forEach((r, i) => {
+      if (r.status !== "fulfilled") return;
+      const tv = asks[i][0];
+      for (const m of r.value.results || []) if (m.poster_path) cand.push({ m, tv, id: (tv ? "s:" : "m:") + m.id });
+    });
+    const present = await catHas(cand.map((c) => c.id));
+    const items = [];
+    const seen = new Set();
+    for (const c of cand) {
+      if (!present.has(c.id) || seen.has(c.id)) continue;
+      seen.add(c.id);
+      items.push(card(slim(c.m, c.tv)));
+    }
+    if (items.length) return items;
+    if (pages.every((p) => p.status === "rejected")) return searchSitio(query);
+    return [];
+  } catch (e) {
+    log("search (índice) falló:", (e && e.code) || "error");
+    return searchSitio(query);
+  }
+}
+
+const parseMovieRef = (ref) => (/^m:(\d+)$/.exec(String(ref || "")) || [])[1] || null;
+const parseShowRef = (ref) => (/^s:(\d+)$/.exec(String(ref || "")) || [])[1] || null;
+
+export async function details(ref) {
+  const sid = parseShowRef(ref);
+  if (sid && catReady()) {
+    try {
+      const d = await tmdb("/tv/" + sid, { append_to_response: "external_ids" });
+      const imdb = d.external_ids && d.external_ids.imdb_id;
+      return {
+        title: d.name,
+        poster: img("w500", d.poster_path),
+        backdrop: img("w1280", d.backdrop_path),
+        overview: d.overview || undefined,
+        genres: (d.genres || []).map((g) => g.name).slice(0, 5),
+        year: yearOf(d.first_air_date),
+        rating: d.vote_average ? Math.round(d.vote_average * 10) / 10 : undefined,
+        ids: { tmdb: d.id, ...(/^tt\d{5,10}$/.test(imdb || "") ? { imdb } : {}) },
+      };
+    } catch (e) {
+      log("details (serie):", (e && e.code) || "error");
+    }
+  }
+  const mid = parseMovieRef(ref);
+  if (mid && catReady()) {
+    try {
+      const d = await tmdb("/movie/" + mid);
+      const imdb = d.imdb_id;
+      return {
+        title: d.title,
+        poster: img("w500", d.poster_path),
+        backdrop: img("w1280", d.backdrop_path),
+        overview: d.overview || undefined,
+        genres: (d.genres || []).map((g) => g.name).slice(0, 5),
+        year: yearOf(d.release_date),
+        rating: d.vote_average ? Math.round(d.vote_average * 10) / 10 : undefined,
+        runtimeMinutes: d.runtime > 0 ? d.runtime : undefined,
+        ids: { tmdb: d.id, ...(/^tt\d{5,10}$/.test(imdb || "") ? { imdb } : {}) },
+      };
+    } catch (e) {
+      log("details (película):", (e && e.code) || "error");
+    }
+  }
+  return detailsSitio(ref);
+}
+
+/** Los capítulos de una serie: los de TMDB (nombres, fotos, sinopsis). Se reproducen con la sesión. */
+export async function episodes(ref) {
+  const sid = parseShowRef(ref);
+  if (!sid || !catReady()) return episodesSitio(ref);
+  let show = null;
+  try {
+    show = await tmdb("/tv/" + sid);
+  } catch (e) {
+    log("episodes:", (e && e.code) || "error");
+    return episodesSitio(ref);
+  }
+  const seasons = ((show && show.seasons) || []).map((s) => s.season_number).filter((n) => n > 0).sort((a, b) => a - b);
+  const info = new Map();
+  try {
+    const groups = [];
+    for (let i = 0; i < seasons.length; i += 20) groups.push(seasons.slice(i, i + 20));
+    const blocks = await Promise.allSettled(
+      groups.map((g, i) => tmdb("/tv/" + sid, { append_to_response: g.map((s) => "season/" + s).join(",") })),
+    );
+    for (const r of blocks) {
+      if (r.status !== "fulfilled") continue;
+      for (const s of seasons) {
+        const sd = r.value["season/" + s];
+        for (const ep of (sd && sd.episodes) || []) info.set(s + "." + ep.episode_number, ep);
+      }
+    }
+  } catch { /* sin fotos ni nombres: los capítulos siguen numerados */ }
+
+  const out = [];
+  for (const s of seasons) {
+    const sd = (show.seasons || []).find((x) => x.season_number === s);
+    const count = (sd && sd.episode_count) || 0;
+    for (let e = 1; e <= count; e++) {
+      const ep = info.get(s + "." + e);
+      out.push({
+        season: s,
+        number: e,
+        ref: "e:" + sid + ":" + s + ":" + e,
+        title: (ep && ep.name) || "Episodio " + e,
+        still: ep ? img("w300", ep.still_path) : undefined,
+        overview: (ep && ep.overview) || undefined,
+        airDate: ep && /^\d{4}-\d{2}-\d{2}$/.test(ep.air_date || "") ? ep.air_date : undefined,
+        runtimeMinutes: ep && ep.runtime > 0 && ep.runtime <= 1000 ? ep.runtime : undefined,
+      });
+    }
+  }
+  if (!out.length) return episodesSitio(ref);
+  const imdb = show.external_ids && show.external_ids.imdb_id;
+  return {
+    series: {
+      title: show.name,
+      poster: img("w500", show.poster_path),
+      backdrop: img("w1280", show.backdrop_path),
+      overview: show.overview || undefined,
+      genres: (show.genres || []).map((g) => g.name).slice(0, 5),
+      year: yearOf(show.first_air_date),
+      rating: show.vote_average ? Math.round(show.vote_average * 10) / 10 : undefined,
+      ids: { tmdb: show.id, ...(/^tt\d{5,10}$/.test(imdb || "") ? { imdb } : {}) },
+    },
+    episodes: out,
+  };
+}
+
+// ================================================================ estado del índice
+
+function agoShort(at) {
+  const minutes = Math.max(0, Math.round((Date.now() - Number(at || 0)) / 60000));
+  if (!Number(at)) return "";
+  if (minutes < 60) return "hace " + Math.max(1, minutes) + " min";
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? "hace " + hours + " h" : "hace " + Math.round(hours / 24) + " días";
+}
+
+/** Una línea con el estado del índice para Ajustes y para la tarjeta de la pantalla. */
+function indexInfo() {
+  const version = sGet(CK.ver);
+  if (indexing()) {
+    const snap = indexSnapshot();
+    return {
+      ready: false,
+      indexing: true,
+      text: "Importando catálogo… " + snap.indexPart + " / " + (snap.indexShards || "?"),
+      textEn: "Importing the catalog… " + snap.indexPart + " / " + (snap.indexShards || "?"),
+    };
+  }
+  if (!version) {
+    return { ready: false, indexing: false, text: "Catálogo sin descargar", textEn: "Catalog not downloaded" };
+  }
+  const movies = catRecentIds("movies").length;
+  const series = catRecentIds("series").length;
+  const when = agoShort(Number(sGet(CK.at)));
+  return {
+    ready: true,
+    indexing: false,
+    version,
+    text: movies + " películas y " + series + " series" + (when ? " · " + when : ""),
+    textEn: movies + " movies and " + series + " series" + (when ? " · " + when : ""),
+  };
+}
+
+/** La tarjeta del índice en Ajustes, con su botón. */
+function indexCard() {
+  const info = indexInfo();
+  const children = [
+    { type: "Row", key: "ind-t", gap: 8, crossAxisAlignment: "center", children: [
+      { type: "Icon", key: "ind-i", name: "sync", size: 20, color: "primary" },
+      { type: "Text", key: "ind-l", text: "Índice de películas", textEn: "Movie index", style: "h4", flex: 1 },
+    ] },
+    { type: "Text", key: "ind-s", color: "muted", text: info.text, textEn: info.textEn },
+    { type: "Text", key: "ind-n", color: "muted", style: "caption",
+      text: "Con el índice, las películas se ven sin cuenta. Las series usan tu sesión del sitio.",
+      textEn: "With the index, movies play without an account. Series use your site session." },
+  ];
+  if (info.indexing) {
+    children.push({ type: "LinearProgressIndicator", key: "ind-p", value: info.indexing ? Math.min(1, (indexSnapshot().indexPart || 0) / Math.max(1, indexSnapshot().indexShards)) : 0 });
+  } else {
+    children.push({
+      type: "TextButton", key: "ind-b", icon: "download",
+      labelText: info.ready ? "Actualizar catálogo" : "Descargar catálogo",
+      labelTextEn: info.ready ? "Refresh catalog" : "Download catalog",
+      onPressed: "index",
+    });
+  }
+  return { type: "Card", key: "ind-card", margin: borde, padding: 16, gap: 12, children };
+}
+
+/** La vista de la importación: barra, avance y un tick que baja el siguiente trozo. */
+function indexView(state, device) {
+  const snap = Object.assign(indexSnapshot(), state || {});
+  const children = [
+    { type: "Text", key: "indv-t", text: "Catálogo de UltraPelisHD", textEn: "UltraPelisHD catalog", style: "h1" },
+    { type: "Text", key: "indv-p", color: "muted",
+      text: "Una sola descarga: de ahí en adelante se actualiza sola por deltas, sin reinstalar el plugin.",
+      textEn: "Downloaded once; from then on it refreshes itself in the background." },
+  ];
+  if (snap.indexing) {
+    children.push({
+      type: "LinearProgressIndicator", key: "indv-bar",
+      value: Math.min(1, (snap.indexPart || 0) / Math.max(1, snap.indexShards || 1)),
+      labelText: "Importando… " + (snap.indexPart || 0) + " / " + (snap.indexShards || "?"),
+      labelTextEn: "Importing… " + (snap.indexPart || 0) + " / " + (snap.indexShards || "?"),
+    });
+    if (snap.indexTotal) {
+      children.push({ type: "Text", key: "indv-c", color: "muted", text: snap.indexSeen + " de " + snap.indexTotal + " títulos", textEn: snap.indexSeen + " of " + snap.indexTotal + " titles" });
+    }
+  } else {
+    children.push({ type: "ElevatedButton", key: "indv-b", labelText: "Descargar catálogo", labelTextEn: "Download catalog", onPressed: "index" });
+  }
+  const tree = {
+    type: "Scaffold",
+    key: "index-view",
+    appBar: appBar("inicio", device, []),
+    body: { type: "Column", key: "indv-body", mainAxisAlignment: "center", crossAxisAlignment: "center", padding: 24, gap: 12, children },
+  };
+  return snap.indexing ? { ...tree, every: { ms: 1500, event: "indexTick" } } : tree;
 }

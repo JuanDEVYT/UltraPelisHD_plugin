@@ -31,6 +31,7 @@ la dirección.
 | **Categorías** | Los géneros del sitio como mosaicos, con su portada. |
 | **Fichas** | Sinopsis, géneros, año, nota, reparto en la ficha cuando el sitio lo trae. |
 | **Temporadas y episodios** | Selector de temporada, capítulos con foto, sinopsis, fecha y duración. |
+| **Índice de películas** | Las películas se ven **sin cuenta**: un índice publicado con las copias DoodStream de cada una. Se descarga una vez, se guarda en el aparato y se actualiza solo por deltas, sin reinstalar el plugin. |
 | **Copias (menú Servidor)** | Todos los servidores del sitio, ordenados como el suyo (los que mejor reproducen primero), cada uno con su etiqueta. |
 | **Idiomas** | La bandera del idioma en cada copia: 🇲🇽 Latino, 🇪🇸 Castellano, 🇬🇧 Subtitulado, 🇺🇸 Inglés (y el resto de idiomas si algún día aparecen). |
 | **Subtítulos** | Las versiones **Subtitulado** vienen como copia propia, y el reproductor de Kino muestra las pistas de subtítulos que traiga el manifiesto HLS. |
@@ -46,13 +47,25 @@ la dirección.
 
 El sitio no publica archivos de video. Su reproductor:
 
-1. Entrega la página del título con un iframe `embed` (id de TMDB) y un **pass** de pocos minutos.
-2. Con ese pass, `api-encrypted.moviemaster.lat/servers` devuelve la lista de servidores por idioma.
-3. Cada servidor tiene su manifiesto HLS (`/video?…&pass=…`).
+1. Entrega la página del título con una **puerta** (`data-uph-watch`) que, con cuenta, devuelve las
+   fuentes de cada servidor: para las películas, un iframe de DoodStream y una copia «Automático»;
+   para los capítulos, solo copias «Automático».
+2. Las copias «Automático» usan un **pass** de pocos minutos e `api-encrypted.moviemaster.lat`.
+3. Cada copia tiene su manifiesto HLS (`/video?…&pass=…`).
 
-El plugin hace exactamente eso: lee la página, pide el pass, lista los servidores y entrega el
-primero a Kino; el resto queda como **copias perezosas** (Kino solo las resuelve si cambias de
-servidor o si la que suena falla, sin pagar el costo al abrir el título).
+El plugin tiene dos caminos:
+
+- **Películas, con el índice.** El plugin trae un catálogo publicado en el release `catalog` de este
+  repositorio: por película, su ruta en el sitio y los códigos de sus copias DoodStream. Se importa a
+  la base de catálogos de Kino (`kino.catalog`), se refresca por deltas y un job de fondo deja la
+  actualización preparada. Al reproducir, el código se entrega al **motor compartido**
+  (`xuper-plugin/kino-plugin-kino-resolver`), que saca el manifiesto. Ni cuenta ni pass.
+- **Series, capítulos y respaldo, con la sesión.** Se lee la ficha, se pide el pass, se listan los
+  servidores y se entrega el primero; el resto queda como copias perezosas. Es lo que hace el sitio
+  para los capítulos, que no publican copia indexable. Si el índice no tiene una copia viva (o no
+  está el motor instalado), una película cae a este mismo camino.
+
+Títulos, pósters, sinopsis, reparto y episodios salen de **TMDB** a través de Kino.
 
 Los segmentos del video se sirven desde CDNs externos, por eso el manifiesto declara
 `streamHosts: "any"` (Kino lo muestra en la hoja de consentimiento).
@@ -121,6 +134,33 @@ respuestas JSON por la ventana oculta, que sí lleva la cookie. En el Registro s
   título y sigue donde ibas.
 - UltraPelisHD es un sitio de terceros: este plugin no aloja, indexa ni controla su contenido.
 
+## El índice (release `catalog`)
+
+El índice vive en el release `catalog` de `JuanDEVYT/UltraPelisHD_plugin`:
+
+| archivo | qué es |
+| --- | --- |
+| `catalog.version.json` | versión publicada, trozos y recuentos |
+| `catalog-1.json` (…-N) | el catálogo en trozos de menos de 5 MB (el tope de una respuesta) |
+| `delta/<versión>.json` | lo que cambió desde esa versión: altas y bajas |
+
+El plugin comprueba la versión al abrir (y el job cada 6 h), aplica el delta y, si no hay delta
+para su versión, se baja el catálogo entero por trozos. Las películas sin copia DoodStream no entran:
+no habría nada que reproducir sin cuenta.
+
+Para construirlo hace falta una sesión del sitio (la puerta de fuentes solo contesta con cuenta):
+
+```
+node tools/uph-login.mjs          # pide correo y contraseña en la terminal; guarda solo cookies
+node tools/uph-index.mjs collect  # lee los sitemaps (45.000+ fichas)
+node tools/uph-index.mjs crawl    # recorre las fichas; se puede cortar y seguir
+node tools/uph-index.mjs build    # arma catalog.json, la versión y el delta en out/
+```
+
+`tools/uph-login.mjs` guarda `.uph-session.json` (cookies, modo 600) y `tools/uph-index.mjs` deja su
+avance en `out/`; los dos están en `.gitignore` y no se publican. En el catálogo solo quedan rutas,
+ids de TMDB y códigos públicos de DoodStream: nunca la cuenta ni la sesión.
+
 ## Desarrollo
 
 El kit de Kino (Node 18+) va incluido en `sdk/`:
@@ -133,6 +173,8 @@ node sdk/run.mjs . section peliculas
 node sdk/run.mjs . episodes series/uzumaki
 node sdk/run.mjs . resolve movie/la-odisea-2026
 node sdk/run.mjs . resolve 'movie/la-odisea-2026|<copia>'
+node sdk/run.mjs . resolve m:1368337        # película del índice (necesita la fila importada)
+node sdk/run.mjs . job refresh
 ```
 
 Documentación: <https://kinotvapp.github.io/kino-plugins/>

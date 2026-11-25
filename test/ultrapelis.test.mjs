@@ -49,6 +49,40 @@ const store = new Map();
 const vistos = [];
 let navegadorLlamadas = 0;
 
+// ── el índice publicado, en miniatura ──────────────────────────────────────
+const ASSET = "https://github.com/JuanDEVYT/UltraPelisHD_plugin/releases/download/catalog";
+const V1 = { version: "2026.11.25-1100", movies: 2, series: 1, shards: [{ name: "catalog-1.json", bytes: 200 }], hosts: ["dood.xxx"] };
+const V2 = { version: "2026.11.26-0900", movies: 3, series: 1, shards: [{ name: "catalog-1.json", bytes: 240 }], hosts: ["dood.xxx"] };
+const SHARD1 = {
+  version: V1.version,
+  part: 1,
+  parts: 1,
+  hosts: ["dood.xxx"],
+  movies:
+    "533535|movie/deadpool-wolverine-2024|L0e/abc123,E0e/esp456\n" +
+    "550|movie/fight-club-1999|L0e/fight01",
+  series: "1399|series/game-of-thrones",
+};
+const DELTA = { version: V2.version, from: V1.version, addMovies: "999|movie/nueva-2026|L0e/nueva01", addSeries: "", remove: ["m:550"] };
+let versionActual = V1;
+let deltaActual = DELTA;
+
+const catalogo = new Map();
+let motorFalta = false;
+const llamadasMotor = [];
+
+const TMDB = {
+  "/movie/533535": { id: 533535, title: "Deadpool y Wolverine", poster_path: "/p1.jpg", backdrop_path: "/b1.jpg", release_date: "2024-07-24", vote_average: 7.6, overview: "Dos antihéroes.", genres: [{ name: "Acción" }], runtime: 128, imdb_id: "tt6263850" },
+  "/movie/550": { id: 550, title: "El club de la lucha", poster_path: "/p2.jpg", backdrop_path: "/b2.jpg", release_date: "1999-10-15", vote_average: 8.4, overview: "Reglas.", genres: [{ name: "Drama" }], runtime: 139 },
+  "/movie/999": { id: 999, title: "Nueva", poster_path: "/p3.jpg", backdrop_path: "/b3.jpg", release_date: "2026-01-01", vote_average: 6, overview: "Nueva.", genres: [] },
+  "/tv/1399": { id: 1399, name: "Juego de tronos", poster_path: "/t1.jpg", backdrop_path: "/tb1.jpg", first_air_date: "2011-04-17", vote_average: 8.4, overview: "Tronos.", genres: [{ name: "Drama" }], seasons: [{ season_number: 0, episode_count: 3 }, { season_number: 1, episode_count: 2 }], external_ids: { imdb_id: "tt0944947" } },
+  "/genre/movie/list": { genres: [{ id: 28, name: "Acción" }, { id: 18, name: "Drama" }] },
+  "/genre/tv/list": { genres: [{ id: 18, name: "Drama" }, { id: 10765, name: "Sci-Fi & Fantasy" }] },
+};
+const listaTmdb = (def, id) => ({ page: 1, total_pages: 1, results: [def] });
+const TARJETA = { id: 533535, title: "Deadpool y Wolverine", poster_path: "/p1.jpg", backdrop_path: "/b1.jpg", release_date: "2024-07-24", vote_average: 7.6 };
+const SERIE = { id: 1399, name: "Juego de tronos", poster_path: "/t1.jpg", backdrop_path: "/tb1.jpg", first_air_date: "2011-04-17", vote_average: 8.4 };
+
 function respuesta(status, body) {
   return {
     ok: status >= 200 && status < 300,
@@ -67,6 +101,13 @@ function respuesta(status, body) {
 async function fetchFalso(url, opciones) {
   const u = String(url);
   vistos.push(u);
+  if (u === ASSET + "/catalog.version.json") return respuesta(200, JSON.stringify(versionActual));
+  if (u === ASSET + "/catalog-1.json") return respuesta(200, JSON.stringify(versionActual.version === V2.version ? { ...SHARD1, version: V2.version } : SHARD1));
+  if (u.indexOf(ASSET + "/delta/") === 0) {
+    const from = u.slice((ASSET + "/delta/").length).replace(/\.json$/, "");
+    return respuesta(deltaActual && deltaActual.from === from ? 200 : 404, JSON.stringify(deltaActual || {}));
+  }
+  if (u === "https://cdn.example/dood.m3u8") return respuesta(200, HLS_OK);
   if (u === BASE + "/") return respuesta(200, pagina(""));
   if (u.indexOf(BASE + "/movie/") === 0 || u.indexOf(BASE + "/series/") === 0) return respuesta(200, pagina(""));
   if (u.indexOf("/api/uph-member-watch/") >= 0) {
@@ -99,6 +140,40 @@ globalThis.kino = {
     keys: () => Array.from(store.keys()),
   },
   rank: { filterRelevant: (a) => a, shortQuery: (s) => s, sortBySimilarity: (a) => a },
+  tmdb: async (path, params) => {
+    const base = TMDB[path];
+    if (!base) {
+      if (path === "/trending/movie/week" || path === "/movie/popular" || path === "/movie/now_playing" || path === "/movie/top_rated") return listaTmdb(TARJETA);
+      if (path === "/trending/tv/week" || path === "/tv/popular" || path === "/tv/top_rated") return listaTmdb(SERIE);
+      if (path === "/discover/tv") return listaTmdb(SERIE);
+      if (path === "/discover/movie") return listaTmdb(TARJETA);
+      if (path === "/search/movie") return listaTmdb(TARJETA);
+      if (path === "/search/tv") return listaTmdb(SERIE);
+      throw Object.assign(new Error("404"), { code: "not_found" });
+    }
+    if (path === "/tv/1399" && params && params.append_to_response) {
+      return {
+        ...base,
+        "season/1": { episodes: [{ episode_number: 1, name: "Invierno", still_path: "/s1.jpg", air_date: "2011-04-17", runtime: 60 }, { episode_number: 2, name: "El camino real" }] },
+      };
+    }
+    return base;
+  },
+  catalog: {
+    upsert: async (items) => { for (const it of items) catalogo.set(it.id, it); },
+    get: async (ids) => ids.filter((id) => catalogo.has(id)).map((id) => catalogo.get(id)),
+    remove: async (ids) => { for (const id of ids) catalogo.delete(id); },
+    clear: async () => { catalogo.clear(); },
+    count: async () => catalogo.size,
+    search: async () => ({ items: [], total: 0 }),
+  },
+  plugins: {
+    call: async (door, fn, args) => {
+      llamadasMotor.push(args && args.url);
+      if (motorFalta) throw Object.assign(new Error("provider_missing"), { code: "provider_missing" });
+      return { streams: [{ url: "https://cdn.example/dood.m3u8", kind: "hls", referer: "https://dood.xxx/" }] };
+    },
+  },
   browser: {
     page: async () => {
       navegadorLlamadas++;
@@ -117,11 +192,24 @@ const REF = "movie/deadpool-wolverine-2024";
 
 function limpia() {
   store.clear();
+  catalogo.clear();
   vistos.length = 0;
+  llamadasMotor.length = 0;
   navegadorLlamadas = 0;
   puertaEstado = 200;
   m3u8Muerto = false;
   fallaPrimeraCopia = false;
+  motorFalta = false;
+  versionActual = V1;
+  deltaActual = DELTA;
+}
+
+/** Deja el índice importado como si la persona ya lo hubiera descargado. */
+async function importaIndice() {
+  const r = await plugin.screenEvent({ name: "index", state: {} });
+  let state = r.state;
+  for (let i = 0; i < 6 && state && state.indexing; i++) state = (await plugin.screenEvent({ name: "indexTick", state })).state;
+  return state;
 }
 
 // ── resolve ─────────────────────────────────────────────────────────────────
@@ -273,4 +361,106 @@ test("pantalla: ajustes enseña el aviso de la cuenta y sus acciones", async () 
   assert.match(json, /Iniciar sesión/);
   assert.match(json, /cuenta gratis/);
   assert.match(json, /Borrar la caché/);
+});
+
+// ── índice (kino.catalog + TMDB + deltas) ───────────────────────────────────
+
+test("índice: las películas del catálogo se reproducen con el motor, sin abrir la puerta", async () => {
+  limpia();
+  await importaIndice();
+  assert.equal(catalogo.size, 3, "2 películas + 1 serie");
+  const r = await plugin.resolve("m:533535");
+  assert.deepEqual(llamadasMotor, ["https://dood.xxx/e/abc123"]);
+  assert.equal(r.label, "🇲🇽 Latino · DoodStream");
+  assert.equal(r.mime, "application/vnd.apple.mpegurl");
+  assert.equal(r.alternatives[0].ref, "c:E0e/esp456");
+  assert.equal(vistos.some((u) => u.indexOf("/api/uph-member-watch/") >= 0), false, "no se abre la puerta");
+});
+
+test("índice: sin motor de reproducción cae a la sesión del sitio", async () => {
+  limpia();
+  await importaIndice();
+  motorFalta = true;
+  puertaEstado = 401;
+  await assert.rejects(
+    () => plugin.resolve("m:533535"),
+    (e) => {
+      assert.match(String(e.userMessage), /cuenta gratis/i);
+      return true;
+    },
+  );
+  assert.ok(vistos.some((u) => u.indexOf("/api/uph-member-watch/") >= 0), "probó la sesión");
+});
+
+test("inicio con índice: filas de TMDB filtradas por el catálogo", async () => {
+  limpia();
+  await importaIndice();
+  const rows = await plugin.home();
+  assert.ok(rows.length >= 3, "hay filas: " + rows.map((r) => r.title).join(", "));
+  const rec = rows.find((r) => r.ref === "browse:recent");
+  assert.ok(rec, "fila de recién agregadas");
+  assert.equal(rec.items[0].ref, "m:533535");
+  assert.equal(rec.items[0].title, "Deadpool y Wolverine");
+  assert.ok(rec.items.some((i) => Array.isArray(i.badges) && i.badges.includes("Latino")), "chip de idioma");
+  assert.ok(rows.some((r) => r.ref === "browse:recentTv" && r.items[0].ref === "s:1399"));
+});
+
+test("búsqueda, navegación y ficha usan TMDB y el índice", async () => {
+  limpia();
+  await importaIndice();
+  const found = await plugin.search({ q: "deadpool" });
+  assert.equal(found[0].ref, "m:533535");
+
+  const page = await plugin.browse("browse:trending");
+  assert.ok(page.items.some((i) => i.ref === "m:533535"));
+
+  const cats = await plugin.categories();
+  assert.ok(cats.some((c) => c.ref === "browse:genre:28"), "los géneros de TMDB");
+
+  const d = await plugin.details("m:533535");
+  assert.equal(d.title, "Deadpool y Wolverine");
+  assert.equal(d.ids.tmdb, 533535);
+  assert.equal(d.runtimeMinutes, 128);
+});
+
+test("episodios: los de TMDB, listos para la sesión", async () => {
+  limpia();
+  await importaIndice();
+  const r = await plugin.episodes("s:1399");
+  assert.equal(r.episodes.length, 2);
+  assert.equal(r.episodes[0].ref, "e:1399:1:1");
+  assert.equal(r.episodes[0].title, "Invierno");
+  assert.equal(r.series.title, "Juego de tronos");
+});
+
+test("job: deja el delta preparado y el inicio lo aplica", async () => {
+  limpia();
+  await importaIndice();
+  versionActual = V2;
+  await plugin.job();
+  assert.ok(store.get("catPending"), "el job guardó el delta");
+  await plugin.home();
+  assert.ok(catalogo.has("m:999"), "entra la película nueva");
+  assert.equal(catalogo.has("m:550"), false, "sale la que ya no está");
+  assert.equal(JSON.parse(store.get("catRecentM"))[0], "m:999");
+  assert.equal(store.get("catVersion"), V2.version);
+});
+
+test("pantalla: el índice en curso enseña su barra y su tick", async () => {
+  limpia();
+  const v = await plugin.screen({ state: { indexing: true, indexPart: 1, indexShards: 2, indexSeen: 10, indexTotal: 20 }, device: "phone" });
+  assert.equal(v.type, "Scaffold");
+  const json = JSON.stringify(v);
+  assert.match(json, /LinearProgressIndicator/);
+  assert.match(json, /indexTick/);
+  assert.match(json, /10 de 20/);
+});
+
+test("ajustes: la tarjeta del índice ofrece descargarlo", async () => {
+  limpia();
+  const v = await plugin.screen({ state: { nav: "ajustes" }, device: "phone" });
+  const json = JSON.stringify(v);
+  assert.match(json, /Catálogo sin descargar/);
+  assert.match(json, /Descargar catálogo/);
+  assert.match(json, /"onPressed":"index"/);
 });

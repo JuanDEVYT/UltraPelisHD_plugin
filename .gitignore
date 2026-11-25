@@ -1,1 +1,5 @@
 .kino-storage.json
+.uph-session.json
+.uph-gate-sample.json
+out/
+.author.pem

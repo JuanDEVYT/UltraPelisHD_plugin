@@ -1,7 +1,7 @@
 {
   "id": "ultrapelishd",
   "name": "UltraPelisHD",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "apiVersion": 20,
   "debug": true,
   "entry": "plugin.js",
@@ -13,6 +13,7 @@
     "api-encrypted.moviemaster.lat"
   ],
   "streamHosts": "any",
+  "fetchHosts": "any",
   "browser": "pages",
   "capabilities": [
     "search",
@@ -21,7 +22,26 @@
     "episodes",
     "resolve",
     "download",
-    "screen"
+    "screen",
+    "catalog",
+    "schedule",
+    "storageLarge"
+  ],
+  "jobs": [
+    {
+      "id": "refresh",
+      "label": {
+        "es": "Actualizar catálogo",
+        "en": "Refresh catalog"
+      },
+      "everyMin": 360,
+      "everyOptions": [
+        180,
+        360,
+        720,
+        1440
+      ]
+    }
   ],
   "categories": [
     "movies",
@@ -104,6 +124,18 @@
       "type": "action"
     },
     {
+      "key": "indice",
+      "label": "Índice de películas",
+      "labelEn": "Movie index",
+      "type": "status"
+    },
+    {
+      "key": "actualizarIndice",
+      "label": "Descargar o actualizar el catálogo",
+      "labelEn": "Download or refresh the catalog",
+      "type": "action"
+    },
+    {
       "key": "ultimo",
       "label": "Últimas lecturas",
       "labelEn": "Last reads",
@@ -150,6 +182,12 @@
         },
         {
           "setting": "ultimo"
+        },
+        {
+          "setting": "indice"
+        },
+        {
+          "setting": "actualizarIndice"
         }
       ]
     },
@@ -173,6 +211,6 @@
   },
   "signature": {
     "authorKey": "0036d8031405ef39f52a4c120617f46a8db166fa23867367f7ae68360f7e31cd",
-    "value": "ff5cf12492a7d64f359ee9de4b3d2184bb1e99ad40e577c8a133dfeb710d09b647188f51593a3148eb3dc82bb6c2b1c20a1b6b64d94d9cdcefc0ddbba8331209"
+    "value": "994aaf31e1b477341f0b73ddf9acd1596ef1fa4dad6dda3b09192126e4975833b6db11a855a3c64a3e48eed70663be83f9924f71ccbc6d81d8ba6bb53ccc5f02"
   }
 }
